@@ -63,9 +63,15 @@ try {
     $scopeEnd     = '{0}.{1}.{2}.200' -f $octets[0], $octets[1], $octets[2]
     $scopeId      = $networkAddr
 
-    $maskInt   = ([uint32]0xFFFFFFFF) -shl (32 - $prefixLength)
-    $maskBytes = [BitConverter]::GetBytes([uint32]$maskInt)
-    if ([BitConverter]::IsLittleEndian) { [Array]::Reverse($maskBytes) }
+    # Build the dotted-quad subnet mask from the prefix length by setting bits one
+    # at a time. Avoids -shl on [uint32], which PowerShell silently promotes through
+    # int32 and turns 0xFFFFFFFF into -1, breaking [BitConverter]::GetBytes([uint32]).
+    $maskBytes = [byte[]]::new(4)
+    for ($i = 0; $i -lt $prefixLength; $i++) {
+        $byteIndex = [int][math]::Floor($i / 8)
+        $bitIndex  = 7 - ($i % 8)
+        $maskBytes[$byteIndex] = [byte]($maskBytes[$byteIndex] -bor (1 -shl $bitIndex))
+    }
     $subnetMask = ([System.Net.IPAddress]::new($maskBytes)).ToString()
 
     $stateDir = "$env:SystemDrive\AzureVMLabs"
