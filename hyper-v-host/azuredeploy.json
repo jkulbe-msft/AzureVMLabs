@@ -128,7 +128,9 @@
     "nicName": "[format('{0}-nic', parameters('vmName'))]",
     "nsgName": "[format('{0}-nsg', parameters('vmName'))]",
     "osDiskName": "[format('{0}-osdisk', parameters('vmName'))]",
+    "dataDiskName": "[format('{0}-datadisk', parameters('vmName'))]",
     "jitPolicyName": "[format('{0}-jit', parameters('vmName'))]",
+    "autoShutdownScheduleName": "[format('shutdown-computevm-{0}', parameters('vmName'))]",
     "hvHostSetupScriptUri": "[uri(parameters('_artifactsLocation'), format('scripts/HVHostSetup.ps1{0}', parameters('_artifactsLocationSasToken')))]"
   },
   "resources": [
@@ -178,6 +180,7 @@
             }
           }
         ],
+        "enableIPForwarding": true,
         "networkSecurityGroup": {
           "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
         }
@@ -228,10 +231,23 @@
             "managedDisk": {
               "storageAccountType": "Premium_LRS"
             }
-          }
+          },
+          "dataDisks": [
+            {
+              "lun": 0,
+              "name": "[variables('dataDiskName')]",
+              "createOption": "Empty",
+              "diskSizeGB": 512,
+              "caching": "None",
+              "managedDisk": {
+                "storageAccountType": "Premium_LRS"
+              }
+            }
+          ]
         },
         "securityProfile": {
           "securityType": "TrustedLaunch",
+          "encryptionAtHost": true,
           "uefiSettings": {
             "secureBootEnabled": true,
             "vTpmEnabled": true
@@ -267,6 +283,28 @@
         "protectedSettings": {
           "commandToExecute": "[format('powershell -ExecutionPolicy Unrestricted -NoProfile -File HVHostSetup.ps1 -NestedSubnetPrefix {0} -DNSServerAddress {1}', parameters('nestedSubnetPrefix'), parameters('domainControllerIPAddress'))]"
         }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.DevTestLab/schedules",
+      "apiVersion": "2018-09-15",
+      "name": "[variables('autoShutdownScheduleName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "status": "Enabled",
+        "taskType": "ComputeVmShutdownTask",
+        "dailyRecurrence": {
+          "time": "2100"
+        },
+        "timeZoneId": "W. Europe Standard Time",
+        "notificationSettings": {
+          "status": "Disabled",
+          "timeInMinutes": 30
+        },
+        "targetResourceId": "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
       },
       "dependsOn": [
         "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"

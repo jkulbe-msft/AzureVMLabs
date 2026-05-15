@@ -123,6 +123,7 @@
     "osDiskName": "[format('{0}-osdisk', parameters('vmName'))]",
     "dataDiskName": "[format('{0}-data', parameters('vmName'))]",
     "jitPolicyName": "[format('{0}-jit', parameters('vmName'))]",
+    "autoShutdownScheduleName": "[format('shutdown-computevm-{0}', parameters('vmName'))]",
     "configureDcScriptUri": "[uri(parameters('_artifactsLocation'), format('scripts/ConfigureDC.ps1{0}', parameters('_artifactsLocationSasToken')))]"
   },
   "resources": [
@@ -243,6 +244,7 @@
         },
         "securityProfile": {
           "securityType": "TrustedLaunch",
+          "encryptionAtHost": true,
           "uefiSettings": {
             "secureBootEnabled": true,
             "vTpmEnabled": true
@@ -271,6 +273,28 @@
         "protectedSettings": {
           "commandToExecute": "[format('powershell -ExecutionPolicy Unrestricted -NoProfile -File ConfigureDC.ps1 -DomainName {0} -SafeModeAdminPassword {1}', parameters('domainName'), parameters('adminPassword'))]"
         }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.DevTestLab/schedules",
+      "apiVersion": "2018-09-15",
+      "name": "[variables('autoShutdownScheduleName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "status": "Enabled",
+        "taskType": "ComputeVmShutdownTask",
+        "dailyRecurrence": {
+          "time": "2100"
+        },
+        "timeZoneId": "W. Europe Standard Time",
+        "notificationSettings": {
+          "status": "Disabled",
+          "timeInMinutes": 30
+        },
+        "targetResourceId": "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
       },
       "dependsOn": [
         "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"

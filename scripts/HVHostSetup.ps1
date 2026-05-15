@@ -21,10 +21,19 @@
       Phase 2 (HVHostPostBoot.ps1, run as SYSTEM on the next boot):
         * Creates the Internal Hyper-V virtual switch "NestedSwitch".
         * Assigns the host vNIC the gateway IP of the nested subnet (e.g. 10.0.2.1/24).
+        * Enables IPv4 forwarding on the internal vNIC and moves it to the Private
+          network profile so WinNAT can route packets between the nested subnet and
+          the Azure NIC and so the Windows Defender Firewall doesn't drop DHCP
+          replies / forwarded traffic to the nested guests.
         * Creates a New-NetNat mapping for the nested subnet, so nested-VM egress is
           SNATted out through the host's primary Azure NIC. Azure return traffic
           (including DC DNS replies for nested DNS queries) is delivered by default
-          Azure routing.
+          Azure routing. The Azure NIC has enableIPForwarding=true so the platform
+          permits the forwarded flow.
+        * Turns on Hyper-V Enhanced Session Mode.
+        * Initializes the 512 GB data disk attached at LUN 0 as F: and points the
+          Hyper-V default VM / VHD paths at F:\Hyper-V so guest storage stays off
+          the OS disk.
         * Disables DHCP rogue detection (the host is not in AD), starts the DHCP Server
           service, and creates a scope for the nested subnet that hands out the host
           vNIC IP as the default gateway (option 003) and the Domain Controller IP as
@@ -143,9 +152,47 @@ try {
     # The internal vNIC has no upstream gateway; don't register it in DNS.
     Set-DnsClient -InterfaceIndex $hostAdapter.ifIndex -RegisterThisConnectionsAddress $false -ErrorAction SilentlyContinue
 
+    # Required for nested-VM connectivity:
+    #  - Forwarding Enabled on the internal vNIC so the host kernel will route
+    #    packets between the nested subnet and the Azure NIC (WinNAT relies on
+    #    in-box IPv4 forwarding; on Windows Server it is off by default).
+    #  - NetworkCategory Private so Windows Defender Firewall doesn't drop the
+    #    DHCP / forwarded traffic to the nested guests (the internal vNIC has
+    #    no gateway and would otherwise be classified as Public).
+    Write-Output 'Enabling IPv4 forwarding and Private network profile on the NestedSwitch host vNIC...'
+    Set-NetIPInterface -InterfaceIndex $hostAdapter.ifIndex -AddressFamily IPv4 -Forwarding Enabled -ErrorAction SilentlyContinue
+    Set-NetConnectionProfile -InterfaceIndex $hostAdapter.ifIndex -NetworkCategory Private -ErrorAction SilentlyContinue
+
     if (-not (Get-NetNat -Name 'NestedNat' -ErrorAction SilentlyContinue)) {
         Write-Output "Creating NAT for $($state.NestedSubnetPrefix)..."
         New-NetNat -Name 'NestedNat' -InternalIPInterfaceAddressPrefix $state.NestedSubnetPrefix | Out-Null
+    }
+
+    # Enhanced Session Mode lets users RDP into nested VMs through VMConnect with
+    # clipboard / drive / device redirection without a working network connection
+    # to the guest. Server defaults this off; turn it on.
+    Write-Output 'Enabling Hyper-V Enhanced Session Mode...'
+    Set-VMHost -EnableEnhancedSessionMode $true
+
+    # Move VM and VHD storage off the OS disk onto the dedicated 512 GB data disk
+    # attached at LUN 0. The disk arrives as RAW; initialize it as GPT, give it
+    # drive letter F:, format as NTFS, then point Hyper-V's default paths at it.
+    $rawDisk = Get-Disk | Where-Object { $_.PartitionStyle -eq 'RAW' } | Sort-Object Number | Select-Object -First 1
+    if ($rawDisk) {
+        Write-Output "Initializing data disk (Number $($rawDisk.Number)) as F: for Hyper-V storage..."
+        Initialize-Disk -Number $rawDisk.Number -PartitionStyle GPT -Confirm:$false | Out-Null
+        New-Partition -DiskNumber $rawDisk.Number -DriveLetter F -UseMaximumSize | Out-Null
+        Format-Volume -DriveLetter F -FileSystem NTFS -NewFileSystemLabel 'HyperV' -Confirm:$false | Out-Null
+    }
+    if (Test-Path 'F:\') {
+        New-Item -ItemType Directory -Path 'F:\Hyper-V\VirtualMachines' -Force | Out-Null
+        New-Item -ItemType Directory -Path 'F:\Hyper-V\VirtualHardDisks' -Force | Out-Null
+        Write-Output "Setting Hyper-V default VM and VHD paths to F:\Hyper-V..."
+        Set-VMHost -VirtualMachinePath 'F:\Hyper-V\VirtualMachines' `
+                   -VirtualHardDiskPath 'F:\Hyper-V\VirtualHardDisks'
+    }
+    else {
+        Write-Warning "Data disk for Hyper-V storage not found; leaving Hyper-V default paths on the OS disk."
     }
 
     # Workgroup DHCP server: skip AD authorization and silence rogue-detection warnings.
