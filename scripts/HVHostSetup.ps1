@@ -90,8 +90,22 @@ try {
         DNSServerAddress   = $DNSServerAddress
     } | ConvertTo-Json | Set-Content -Path "$stateDir\HVHostSetup.state.json" -Encoding UTF8
 
-    Write-Output 'Installing Hyper-V, RemoteAccess/Routing (for WinNAT) and DHCP Server roles...'
-    Install-WindowsFeature -Name Hyper-V, RemoteAccess, Routing, DHCP `
+    # Install Hyper-V via DISM (Enable-WindowsOptionalFeature) rather than
+    # Install-WindowsFeature. On Trusted Launch VMs (securityType = TrustedLaunch),
+    # the Server Manager cmdlet runs a strict BIOS prerequisite check that incorrectly
+    # reports "Hyper-V cannot be installed because virtualization support is not
+    # enabled in the BIOS", even on sizes that do support nested virtualization
+    # (e.g. Standard_D8as_v7). See:
+    # https://learn.microsoft.com/troubleshoot/azure/virtual-machines/windows/troubleshoot-vm-by-use-nested-virtualization
+    # The DISM path doesn't run that check and is the same mechanism Windows client
+    # SKUs (Windows 10/11) use to enable Hyper-V on Trusted Launch VMs successfully.
+    # 'Microsoft-Hyper-V-All' is the umbrella feature; with -All it pulls in the
+    # hypervisor, services, PowerShell module and Hyper-V Manager.
+    Write-Output 'Enabling Hyper-V optional feature (DISM)...'
+    Enable-WindowsOptionalFeature -Online -FeatureName 'Microsoft-Hyper-V-All' -All -NoRestart | Out-Null
+
+    Write-Output 'Installing RemoteAccess/Routing (for WinNAT) and DHCP Server roles...'
+    Install-WindowsFeature -Name RemoteAccess, Routing, DHCP `
         -IncludeManagementTools -IncludeAllSubFeature | Out-Null
 
     Write-Output 'Writing post-boot configuration script...'
