@@ -2,7 +2,12 @@
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
   "contentVersion": "1.0.0.0",
   "metadata": {
-    "description": "Deploys a Windows Server VM acting as a Domain Controller, following https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/deploy/virtual-dc/adds-on-azure-vm. The AD DS database, logs and SYSVOL are placed on a separate data disk with host caching set to None. The VM is attached to the Azure-VMs subnet with static IP 10.0.3.4 and a public IP that is intended to be protected by Just-In-Time (JIT) access."
+    "_generator": {
+      "name": "bicep",
+      "version": "0.43.8.12551",
+      "templateHash": "2486309534431251534"
+    },
+    "description": "Deploys a Windows Server 2025 Azure Edition VM acting as a Domain Controller, following https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/deploy/virtual-dc/adds-on-azure-vm. The AD DS database, logs and SYSVOL are placed on a separate data disk with host caching set to None. The VM uses Hotpatch (AutomaticByPlatform) and is attached to the Azure-VMs subnet with a static private IP and a public IP intended to be protected by Just-In-Time (JIT) access."
   },
   "parameters": {
     "location": {
@@ -77,9 +82,16 @@
     },
     "windowsServerSku": {
       "type": "string",
-      "defaultValue": "2022-datacenter-azure-edition",
+      "defaultValue": "2025-datacenter-azure-edition",
       "metadata": {
-        "description": "SKU of the Windows Server image used for the Domain Controller."
+        "description": "SKU of the Windows Server image used for the Domain Controller. Defaults to 2025 Azure Edition (Hotpatch-compatible)."
+      }
+    },
+    "enableHotpatching": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Whether Hotpatch is enabled on the VM. Requires a Hotpatch-compatible image SKU."
       }
     },
     "dataDiskSizeGB": {
@@ -110,14 +122,13 @@
     "nsgName": "[format('{0}-nsg', parameters('vmName'))]",
     "osDiskName": "[format('{0}-osdisk', parameters('vmName'))]",
     "dataDiskName": "[format('{0}-data', parameters('vmName'))]",
-    "subnetId": "[resourceId(parameters('virtualNetworkResourceGroupName'), 'Microsoft.Network/virtualNetworks/subnets', parameters('virtualNetworkName'), parameters('azureVMsSubnetName'))]",
-    "configureDcScriptUri": "[uri(parameters('_artifactsLocation'), format('scripts/ConfigureDC.ps1{0}', parameters('_artifactsLocationSasToken')))]",
-    "jitPolicyName": "[format('{0}-jit', parameters('vmName'))]"
+    "jitPolicyName": "[format('{0}-jit', parameters('vmName'))]",
+    "configureDcScriptUri": "[uri(parameters('_artifactsLocation'), format('scripts/ConfigureDC.ps1{0}', parameters('_artifactsLocationSasToken')))]"
   },
   "resources": [
     {
       "type": "Microsoft.Network/networkSecurityGroups",
-      "apiVersion": "2023-04-01",
+      "apiVersion": "2024-05-01",
       "name": "[variables('nsgName')]",
       "location": "[parameters('location')]",
       "properties": {
@@ -126,7 +137,7 @@
     },
     {
       "type": "Microsoft.Network/publicIPAddresses",
-      "apiVersion": "2023-04-01",
+      "apiVersion": "2024-05-01",
       "name": "[variables('publicIPAddressName')]",
       "location": "[parameters('location')]",
       "sku": {
@@ -140,13 +151,9 @@
     },
     {
       "type": "Microsoft.Network/networkInterfaces",
-      "apiVersion": "2023-04-01",
+      "apiVersion": "2024-05-01",
       "name": "[variables('networkInterfaceName')]",
       "location": "[parameters('location')]",
-      "dependsOn": [
-        "[resourceId('Microsoft.Network/publicIPAddresses', variables('publicIPAddressName'))]",
-        "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
-      ],
       "properties": {
         "ipConfigurations": [
           {
@@ -155,7 +162,7 @@
               "privateIPAllocationMethod": "Static",
               "privateIPAddress": "[parameters('privateIPAddress')]",
               "subnet": {
-                "id": "[variables('subnetId')]"
+                "id": "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('virtualNetworkResourceGroupName')), 'Microsoft.Network/virtualNetworks/subnets', split(format('{0}/{1}', parameters('virtualNetworkName'), parameters('azureVMsSubnetName')), '/')[0], split(format('{0}/{1}', parameters('virtualNetworkName'), parameters('azureVMsSubnetName')), '/')[1])]"
               },
               "publicIPAddress": {
                 "id": "[resourceId('Microsoft.Network/publicIPAddresses', variables('publicIPAddressName'))]"
@@ -166,16 +173,17 @@
         "networkSecurityGroup": {
           "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
         }
-      }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]",
+        "[resourceId('Microsoft.Network/publicIPAddresses', variables('publicIPAddressName'))]"
+      ]
     },
     {
       "type": "Microsoft.Compute/virtualMachines",
-      "apiVersion": "2023-09-01",
+      "apiVersion": "2024-07-01",
       "name": "[parameters('vmName')]",
       "location": "[parameters('location')]",
-      "dependsOn": [
-        "[resourceId('Microsoft.Network/networkInterfaces', variables('networkInterfaceName'))]"
-      ],
       "properties": {
         "hardwareProfile": {
           "vmSize": "[parameters('vmSize')]"
@@ -188,7 +196,13 @@
             "provisionVMAgent": true,
             "enableAutomaticUpdates": true,
             "patchSettings": {
-              "patchMode": "AutomaticByOS"
+              "patchMode": "AutomaticByPlatform",
+              "enableHotpatching": "[parameters('enableHotpatching')]",
+              "assessmentMode": "AutomaticByPlatform",
+              "automaticByPlatformSettings": {
+                "rebootSetting": "IfRequired",
+                "bypassPlatformSafetyChecksOnUserSchedule": false
+              }
             }
           }
         },
@@ -234,16 +248,16 @@
             "vTpmEnabled": true
           }
         }
-      }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkInterfaces', variables('networkInterfaceName'))]"
+      ]
     },
     {
       "type": "Microsoft.Compute/virtualMachines/extensions",
-      "apiVersion": "2023-09-01",
-      "name": "[format('{0}/ConfigureDC', parameters('vmName'))]",
+      "apiVersion": "2024-07-01",
+      "name": "[format('{0}/{1}', parameters('vmName'), 'ConfigureDC')]",
       "location": "[parameters('location')]",
-      "dependsOn": [
-        "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
-      ],
       "properties": {
         "publisher": "Microsoft.Compute",
         "type": "CustomScriptExtension",
@@ -257,16 +271,16 @@
         "protectedSettings": {
           "commandToExecute": "[format('powershell -ExecutionPolicy Unrestricted -NoProfile -File ConfigureDC.ps1 -DomainName {0} -SafeModeAdminPassword {1}', parameters('domainName'), parameters('adminPassword'))]"
         }
-      }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
+      ]
     },
     {
       "type": "Microsoft.Security/locations/jitNetworkAccessPolicies",
       "apiVersion": "2020-01-01",
       "name": "[format('{0}/{1}', parameters('location'), variables('jitPolicyName'))]",
       "kind": "Basic",
-      "dependsOn": [
-        "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
-      ],
       "properties": {
         "virtualMachines": [
           {
@@ -293,7 +307,10 @@
             ]
           }
         ]
-      }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
+      ]
     }
   ],
   "outputs": {
@@ -305,7 +322,7 @@
       "type": "string",
       "value": "[parameters('privateIPAddress')]"
     },
-    "domainName": {
+    "domainNameOut": {
       "type": "string",
       "value": "[parameters('domainName')]"
     }

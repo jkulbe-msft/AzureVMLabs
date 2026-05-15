@@ -2,7 +2,12 @@
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
   "contentVersion": "1.0.0.0",
   "metadata": {
-    "description": "Deploys a Windows 11 VM that acts as a nested Hyper-V host, following https://github.com/azure/azure-quickstart-templates/tree/master/demos/nested-vms-in-virtual-network. The VM has two NICs (NAT subnet + Hyper-V LAN subnet), a public IP intended to be protected by Just-In-Time (JIT) access, Hyper-V enabled, and a virtual switch wired up via RRAS/DHCP so that nested VMs receive internet connectivity and use the Domain Controller as their DNS server."
+    "_generator": {
+      "name": "bicep",
+      "version": "0.43.8.12551",
+      "templateHash": "16144338129030581517"
+    },
+    "description": "Deploys a Windows Server 2025 Azure Edition (Hotpatch) VM that acts as a nested Hyper-V host. The VM has a single NIC on the NAT subnet, a public IP intended to be protected by Just-In-Time (JIT) access, Hyper-V enabled, and an internal virtual switch wired up via the WinNAT stack (New-NetNat) with an in-box DHCP scope so that nested VMs receive DHCP, outbound internet connectivity, and reach the Azure VNet (including the Domain Controller for DNS). The host is NOT domain-joined."
   },
   "parameters": {
     "location": {
@@ -42,30 +47,44 @@
     },
     "imagePublisher": {
       "type": "string",
-      "defaultValue": "microsoftwindowsdesktop",
+      "defaultValue": "MicrosoftWindowsServer",
       "metadata": {
-        "description": "Marketplace image publisher for the Hyper-V host VM."
+        "description": "Marketplace image publisher for the Hyper-V host VM. Defaults to Windows Server (required for the DHCP Server role used to hand out IPs to nested VMs)."
       }
     },
     "imageOffer": {
       "type": "string",
-      "defaultValue": "windows-11",
+      "defaultValue": "WindowsServer",
       "metadata": {
         "description": "Marketplace image offer for the Hyper-V host VM."
       }
     },
     "imageSku": {
       "type": "string",
-      "defaultValue": "win11-25h2-ent",
+      "defaultValue": "2025-datacenter-azure-edition",
       "metadata": {
-        "description": "Marketplace image SKU for the Hyper-V host VM."
+        "description": "Marketplace image SKU for the Hyper-V host VM. Defaults to 2025 Azure Edition (Hotpatch-compatible)."
+      }
+    },
+    "enableHotpatching": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Whether Hotpatch is enabled on the VM. Requires a Hotpatch-compatible image SKU."
       }
     },
     "domainControllerIPAddress": {
       "type": "string",
       "defaultValue": "10.0.3.4",
       "metadata": {
-        "description": "IP address of the Domain Controller. Used as the DNS server handed out to nested VMs."
+        "description": "IP address of the Domain Controller. Handed out as the DNS server option (006) in the DHCP scope so nested VMs resolve Active Directory names against the DC."
+      }
+    },
+    "nestedSubnetPrefix": {
+      "type": "string",
+      "defaultValue": "10.0.2.0/24",
+      "metadata": {
+        "description": "CIDR of the nested (internal Hyper-V switch) subnet. Used for the host vNIC IP, the New-NetNat mapping, and the DHCP scope handed out to nested VMs."
       }
     },
     "virtualNetworkResourceGroupName": {
@@ -86,28 +105,7 @@
       "type": "string",
       "defaultValue": "NAT",
       "metadata": {
-        "description": "Name of the NAT subnet (primary NIC)."
-      }
-    },
-    "hyperVSubnetName": {
-      "type": "string",
-      "defaultValue": "Hyper-V-LAN",
-      "metadata": {
-        "description": "Name of the Hyper-V LAN subnet (secondary NIC, used as the next hop for nested VM traffic)."
-      }
-    },
-    "ghostedSubnetPrefix": {
-      "type": "string",
-      "defaultValue": "10.0.2.0/24",
-      "metadata": {
-        "description": "Address prefix used by the nested (Ghosted) VMs."
-      }
-    },
-    "virtualNetworkAddressPrefix": {
-      "type": "string",
-      "defaultValue": "10.0.0.0/22",
-      "metadata": {
-        "description": "Address space of the virtual network. Used so that nested VMs route Azure traffic via the host."
+        "description": "Name of the NAT subnet to attach the Hyper-V host NIC to."
       }
     },
     "_artifactsLocation": {
@@ -127,19 +125,16 @@
   },
   "variables": {
     "publicIPAddressName": "[format('{0}-pip', parameters('vmName'))]",
-    "nic1Name": "[format('{0}-nic1', parameters('vmName'))]",
-    "nic2Name": "[format('{0}-nic2', parameters('vmName'))]",
+    "nicName": "[format('{0}-nic', parameters('vmName'))]",
     "nsgName": "[format('{0}-nsg', parameters('vmName'))]",
     "osDiskName": "[format('{0}-osdisk', parameters('vmName'))]",
-    "natSubnetId": "[resourceId(parameters('virtualNetworkResourceGroupName'), 'Microsoft.Network/virtualNetworks/subnets', parameters('virtualNetworkName'), parameters('natSubnetName'))]",
-    "hyperVSubnetId": "[resourceId(parameters('virtualNetworkResourceGroupName'), 'Microsoft.Network/virtualNetworks/subnets', parameters('virtualNetworkName'), parameters('hyperVSubnetName'))]",
-    "hvHostSetupScriptUri": "[uri(parameters('_artifactsLocation'), format('scripts/HVHostSetup.ps1{0}', parameters('_artifactsLocationSasToken')))]",
-    "jitPolicyName": "[format('{0}-jit', parameters('vmName'))]"
+    "jitPolicyName": "[format('{0}-jit', parameters('vmName'))]",
+    "hvHostSetupScriptUri": "[uri(parameters('_artifactsLocation'), format('scripts/HVHostSetup.ps1{0}', parameters('_artifactsLocationSasToken')))]"
   },
   "resources": [
     {
       "type": "Microsoft.Network/networkSecurityGroups",
-      "apiVersion": "2023-04-01",
+      "apiVersion": "2024-05-01",
       "name": "[variables('nsgName')]",
       "location": "[parameters('location')]",
       "properties": {
@@ -148,7 +143,7 @@
     },
     {
       "type": "Microsoft.Network/publicIPAddresses",
-      "apiVersion": "2023-04-01",
+      "apiVersion": "2024-05-01",
       "name": "[variables('publicIPAddressName')]",
       "location": "[parameters('location')]",
       "sku": {
@@ -165,13 +160,9 @@
     },
     {
       "type": "Microsoft.Network/networkInterfaces",
-      "apiVersion": "2023-04-01",
-      "name": "[variables('nic1Name')]",
+      "apiVersion": "2024-05-01",
+      "name": "[variables('nicName')]",
       "location": "[parameters('location')]",
-      "dependsOn": [
-        "[resourceId('Microsoft.Network/publicIPAddresses', variables('publicIPAddressName'))]",
-        "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
-      ],
       "properties": {
         "ipConfigurations": [
           {
@@ -179,7 +170,7 @@
             "properties": {
               "privateIPAllocationMethod": "Dynamic",
               "subnet": {
-                "id": "[variables('natSubnetId')]"
+                "id": "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('virtualNetworkResourceGroupName')), 'Microsoft.Network/virtualNetworks/subnets', split(format('{0}/{1}', parameters('virtualNetworkName'), parameters('natSubnetName')), '/')[0], split(format('{0}/{1}', parameters('virtualNetworkName'), parameters('natSubnetName')), '/')[1])]"
               },
               "publicIPAddress": {
                 "id": "[resourceId('Microsoft.Network/publicIPAddresses', variables('publicIPAddressName'))]"
@@ -190,44 +181,17 @@
         "networkSecurityGroup": {
           "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
         }
-      }
-    },
-    {
-      "type": "Microsoft.Network/networkInterfaces",
-      "apiVersion": "2023-04-01",
-      "name": "[variables('nic2Name')]",
-      "location": "[parameters('location')]",
+      },
       "dependsOn": [
-        "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
-      ],
-      "properties": {
-        "ipConfigurations": [
-          {
-            "name": "ipconfig1",
-            "properties": {
-              "privateIPAllocationMethod": "Static",
-              "privateIPAddress": "10.0.1.4",
-              "subnet": {
-                "id": "[variables('hyperVSubnetId')]"
-              }
-            }
-          }
-        ],
-        "enableIPForwarding": true,
-        "networkSecurityGroup": {
-          "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
-        }
-      }
+        "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]",
+        "[resourceId('Microsoft.Network/publicIPAddresses', variables('publicIPAddressName'))]"
+      ]
     },
     {
       "type": "Microsoft.Compute/virtualMachines",
-      "apiVersion": "2023-09-01",
+      "apiVersion": "2024-07-01",
       "name": "[parameters('vmName')]",
       "location": "[parameters('location')]",
-      "dependsOn": [
-        "[resourceId('Microsoft.Network/networkInterfaces', variables('nic1Name'))]",
-        "[resourceId('Microsoft.Network/networkInterfaces', variables('nic2Name'))]"
-      ],
       "properties": {
         "hardwareProfile": {
           "vmSize": "[parameters('vmSize')]"
@@ -238,7 +202,16 @@
           "adminPassword": "[parameters('adminPassword')]",
           "windowsConfiguration": {
             "provisionVMAgent": true,
-            "enableAutomaticUpdates": true
+            "enableAutomaticUpdates": true,
+            "patchSettings": {
+              "patchMode": "AutomaticByPlatform",
+              "enableHotpatching": "[parameters('enableHotpatching')]",
+              "assessmentMode": "AutomaticByPlatform",
+              "automaticByPlatformSettings": {
+                "rebootSetting": "IfRequired",
+                "bypassPlatformSafetyChecksOnUserSchedule": false
+              }
+            }
           }
         },
         "storageProfile": {
@@ -257,32 +230,30 @@
             }
           }
         },
+        "securityProfile": {
+          "securityType": "TrustedLaunch",
+          "uefiSettings": {
+            "secureBootEnabled": true,
+            "vTpmEnabled": true
+          }
+        },
         "networkProfile": {
           "networkInterfaces": [
             {
-              "id": "[resourceId('Microsoft.Network/networkInterfaces', variables('nic1Name'))]",
-              "properties": {
-                "primary": true
-              }
-            },
-            {
-              "id": "[resourceId('Microsoft.Network/networkInterfaces', variables('nic2Name'))]",
-              "properties": {
-                "primary": false
-              }
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', variables('nicName'))]"
             }
           ]
         }
-      }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkInterfaces', variables('nicName'))]"
+      ]
     },
     {
       "type": "Microsoft.Compute/virtualMachines/extensions",
-      "apiVersion": "2023-09-01",
-      "name": "[format('{0}/HVHostSetup', parameters('vmName'))]",
+      "apiVersion": "2024-07-01",
+      "name": "[format('{0}/{1}', parameters('vmName'), 'HVHostSetup')]",
       "location": "[parameters('location')]",
-      "dependsOn": [
-        "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
-      ],
       "properties": {
         "publisher": "Microsoft.Compute",
         "type": "CustomScriptExtension",
@@ -294,18 +265,18 @@
           ]
         },
         "protectedSettings": {
-          "commandToExecute": "[format('powershell -ExecutionPolicy Unrestricted -NoProfile -File HVHostSetup.ps1 -NIC1IPAddress {0} -NIC2IPAddress {1} -GhostedSubnetPrefix {2} -VirtualNetworkPrefix {3} -DNSServerAddress {4}', reference(resourceId('Microsoft.Network/networkInterfaces', variables('nic1Name'))).ipConfigurations[0].properties.privateIPAddress, '10.0.1.4', parameters('ghostedSubnetPrefix'), parameters('virtualNetworkAddressPrefix'), parameters('domainControllerIPAddress'))]"
+          "commandToExecute": "[format('powershell -ExecutionPolicy Unrestricted -NoProfile -File HVHostSetup.ps1 -NestedSubnetPrefix {0} -DNSServerAddress {1}', parameters('nestedSubnetPrefix'), parameters('domainControllerIPAddress'))]"
         }
-      }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
+      ]
     },
     {
       "type": "Microsoft.Security/locations/jitNetworkAccessPolicies",
       "apiVersion": "2020-01-01",
       "name": "[format('{0}/{1}', parameters('location'), variables('jitPolicyName'))]",
       "kind": "Basic",
-      "dependsOn": [
-        "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
-      ],
       "properties": {
         "virtualMachines": [
           {
@@ -338,7 +309,10 @@
             ]
           }
         ]
-      }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
+      ]
     }
   ],
   "outputs": {
@@ -348,7 +322,7 @@
     },
     "hyperVHostFqdn": {
       "type": "string",
-      "value": "[reference(resourceId('Microsoft.Network/publicIPAddresses', variables('publicIPAddressName'))).dnsSettings.fqdn]"
+      "value": "[reference(resourceId('Microsoft.Network/publicIPAddresses', variables('publicIPAddressName')), '2024-05-01').dnsSettings.fqdn]"
     }
   }
 }

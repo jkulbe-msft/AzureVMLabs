@@ -2,7 +2,12 @@
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
   "contentVersion": "1.0.0.0",
   "metadata": {
-    "description": "Deploys the virtual network infrastructure used by the AzureVMLabs AVD / Windows 365 demo environment. Based on https://github.com/azure/azure-quickstart-templates/tree/master/demos/nested-vms-in-virtual-network."
+    "_generator": {
+      "name": "bicep",
+      "version": "0.43.8.12551",
+      "templateHash": "13275409875572905716"
+    },
+    "description": "Deploys the virtual network infrastructure used by the AzureVMLabs demo environment. Two subnets are defined: NAT (for the Hyper-V host) and Azure-VMs (for the Domain Controller and any other Azure-hosted VMs). Nested VMs sit behind the Hyper-V host on an internal Hyper-V switch and reach the network through host-side NAT, so no Azure subnet is required for them."
   },
   "parameters": {
     "location": {
@@ -23,121 +28,58 @@
       "type": "string",
       "defaultValue": "10.0.0.0/22",
       "metadata": {
-        "description": "Virtual network address space."
+        "description": "Virtual network address space. Wide enough to accommodate future subnets without redeploying."
       }
     },
     "natSubnetName": {
       "type": "string",
       "defaultValue": "NAT",
       "metadata": {
-        "description": "Name of the NAT subnet (used by the Hyper-V host external NIC)."
+        "description": "Name of the NAT subnet (used by the Hyper-V host NIC)."
       }
     },
     "natSubnetPrefix": {
       "type": "string",
-      "defaultValue": "10.0.0.0/24"
-    },
-    "hyperVSubnetName": {
-      "type": "string",
-      "defaultValue": "Hyper-V-LAN",
+      "defaultValue": "10.0.0.0/24",
       "metadata": {
-        "description": "Name of the Hyper-V LAN subnet (used by the Hyper-V host second NIC)."
+        "description": "Address prefix of the NAT subnet."
       }
-    },
-    "hyperVSubnetPrefix": {
-      "type": "string",
-      "defaultValue": "10.0.1.0/24"
-    },
-    "ghostedSubnetName": {
-      "type": "string",
-      "defaultValue": "Ghosted",
-      "metadata": {
-        "description": "Address space used by the nested VMs behind the Hyper-V host. No Azure resources attach here directly."
-      }
-    },
-    "ghostedSubnetPrefix": {
-      "type": "string",
-      "defaultValue": "10.0.2.0/24"
     },
     "azureVMsSubnetName": {
       "type": "string",
       "defaultValue": "Azure-VMs",
       "metadata": {
-        "description": "Subnet for Azure-hosted VMs such as the Domain Controller."
+        "description": "Name of the subnet for Azure-hosted VMs such as the Domain Controller."
       }
     },
     "azureVMsSubnetPrefix": {
       "type": "string",
-      "defaultValue": "10.0.3.0/24"
+      "defaultValue": "10.0.3.0/24",
+      "metadata": {
+        "description": "Address prefix of the Azure-VMs subnet."
+      }
     }
-  },
-  "variables": {
-    "natSubnetNSGName": "[format('{0}NSG', parameters('natSubnetName'))]",
-    "hyperVSubnetNSGName": "[format('{0}NSG', parameters('hyperVSubnetName'))]",
-    "ghostedSubnetNSGName": "[format('{0}NSG', parameters('ghostedSubnetName'))]",
-    "azureVMsSubnetNSGName": "[format('{0}NSG', parameters('azureVMsSubnetName'))]",
-    "azureVMsSubnetUDRName": "[format('{0}UDR', parameters('azureVMsSubnetName'))]"
   },
   "resources": [
     {
       "type": "Microsoft.Network/networkSecurityGroups",
-      "apiVersion": "2023-04-01",
-      "name": "[variables('natSubnetNSGName')]",
+      "apiVersion": "2024-05-01",
+      "name": "[format('{0}NSG', parameters('natSubnetName'))]",
       "location": "[parameters('location')]",
       "properties": {}
     },
     {
       "type": "Microsoft.Network/networkSecurityGroups",
-      "apiVersion": "2023-04-01",
-      "name": "[variables('hyperVSubnetNSGName')]",
+      "apiVersion": "2024-05-01",
+      "name": "[format('{0}NSG', parameters('azureVMsSubnetName'))]",
       "location": "[parameters('location')]",
       "properties": {}
-    },
-    {
-      "type": "Microsoft.Network/networkSecurityGroups",
-      "apiVersion": "2023-04-01",
-      "name": "[variables('ghostedSubnetNSGName')]",
-      "location": "[parameters('location')]",
-      "properties": {}
-    },
-    {
-      "type": "Microsoft.Network/networkSecurityGroups",
-      "apiVersion": "2023-04-01",
-      "name": "[variables('azureVMsSubnetNSGName')]",
-      "location": "[parameters('location')]",
-      "properties": {}
-    },
-    {
-      "type": "Microsoft.Network/routeTables",
-      "apiVersion": "2023-04-01",
-      "name": "[variables('azureVMsSubnetUDRName')]",
-      "location": "[parameters('location')]",
-      "properties": {
-        "routes": [
-          {
-            "name": "Nested-VMs",
-            "properties": {
-              "addressPrefix": "[parameters('ghostedSubnetPrefix')]",
-              "nextHopType": "VirtualAppliance",
-              "nextHopIpAddress": "10.0.1.4"
-            }
-          }
-        ],
-        "disableBgpRoutePropagation": false
-      }
     },
     {
       "type": "Microsoft.Network/virtualNetworks",
-      "apiVersion": "2023-04-01",
+      "apiVersion": "2024-05-01",
       "name": "[parameters('virtualNetworkName')]",
       "location": "[parameters('location')]",
-      "dependsOn": [
-        "[resourceId('Microsoft.Network/networkSecurityGroups', variables('natSubnetNSGName'))]",
-        "[resourceId('Microsoft.Network/networkSecurityGroups', variables('hyperVSubnetNSGName'))]",
-        "[resourceId('Microsoft.Network/networkSecurityGroups', variables('ghostedSubnetNSGName'))]",
-        "[resourceId('Microsoft.Network/networkSecurityGroups', variables('azureVMsSubnetNSGName'))]",
-        "[resourceId('Microsoft.Network/routeTables', variables('azureVMsSubnetUDRName'))]"
-      ],
       "properties": {
         "addressSpace": {
           "addressPrefixes": [
@@ -150,25 +92,7 @@
             "properties": {
               "addressPrefix": "[parameters('natSubnetPrefix')]",
               "networkSecurityGroup": {
-                "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('natSubnetNSGName'))]"
-              }
-            }
-          },
-          {
-            "name": "[parameters('hyperVSubnetName')]",
-            "properties": {
-              "addressPrefix": "[parameters('hyperVSubnetPrefix')]",
-              "networkSecurityGroup": {
-                "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('hyperVSubnetNSGName'))]"
-              }
-            }
-          },
-          {
-            "name": "[parameters('ghostedSubnetName')]",
-            "properties": {
-              "addressPrefix": "[parameters('ghostedSubnetPrefix')]",
-              "networkSecurityGroup": {
-                "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('ghostedSubnetNSGName'))]"
+                "id": "[resourceId('Microsoft.Network/networkSecurityGroups', format('{0}NSG', parameters('natSubnetName')))]"
               }
             }
           },
@@ -177,15 +101,16 @@
             "properties": {
               "addressPrefix": "[parameters('azureVMsSubnetPrefix')]",
               "networkSecurityGroup": {
-                "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('azureVMsSubnetNSGName'))]"
-              },
-              "routeTable": {
-                "id": "[resourceId('Microsoft.Network/routeTables', variables('azureVMsSubnetUDRName'))]"
+                "id": "[resourceId('Microsoft.Network/networkSecurityGroups', format('{0}NSG', parameters('azureVMsSubnetName')))]"
               }
             }
           }
         ]
-      }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkSecurityGroups', format('{0}NSG', parameters('azureVMsSubnetName')))]",
+        "[resourceId('Microsoft.Network/networkSecurityGroups', format('{0}NSG', parameters('natSubnetName')))]"
+      ]
     }
   ],
   "outputs": {
@@ -197,21 +122,13 @@
       "type": "string",
       "value": "[resourceId('Microsoft.Network/virtualNetworks', parameters('virtualNetworkName'))]"
     },
-    "azureVMsSubnetName": {
-      "type": "string",
-      "value": "[parameters('azureVMsSubnetName')]"
-    },
-    "hyperVSubnetName": {
-      "type": "string",
-      "value": "[parameters('hyperVSubnetName')]"
-    },
     "natSubnetName": {
       "type": "string",
       "value": "[parameters('natSubnetName')]"
     },
-    "ghostedSubnetPrefix": {
+    "azureVMsSubnetName": {
       "type": "string",
-      "value": "[parameters('ghostedSubnetPrefix')]"
+      "value": "[parameters('azureVMsSubnetName')]"
     },
     "virtualNetworkAddressPrefix": {
       "type": "string",
