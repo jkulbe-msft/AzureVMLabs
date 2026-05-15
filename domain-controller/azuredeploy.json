@@ -1,0 +1,313 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "Deploys a Windows Server VM acting as a Domain Controller, following https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/deploy/virtual-dc/adds-on-azure-vm. The AD DS database, logs and SYSVOL are placed on a separate data disk with host caching set to None. The VM is attached to the Azure-VMs subnet with static IP 10.0.3.4 and a public IP that is intended to be protected by Just-In-Time (JIT) access."
+  },
+  "parameters": {
+    "location": {
+      "type": "string",
+      "defaultValue": "northeurope",
+      "metadata": {
+        "description": "Location for all Domain Controller resources."
+      }
+    },
+    "vmName": {
+      "type": "string",
+      "defaultValue": "DC01",
+      "maxLength": 15,
+      "metadata": {
+        "description": "Computer name of the Domain Controller VM. 15 characters maximum."
+      }
+    },
+    "vmSize": {
+      "type": "string",
+      "defaultValue": "Standard_B2s_v2",
+      "metadata": {
+        "description": "Size of the Domain Controller VM. Default is the cheap burstable Standard_B2s_v2."
+      }
+    },
+    "adminUsername": {
+      "type": "string",
+      "metadata": {
+        "description": "Administrator username for the Domain Controller VM. Also used as the initial domain administrator."
+      }
+    },
+    "adminPassword": {
+      "type": "securestring",
+      "minLength": 12,
+      "metadata": {
+        "description": "Administrator password for the Domain Controller VM. Also used as the Directory Services Restore Mode (DSRM) password during the ADDS promotion."
+      }
+    },
+    "domainName": {
+      "type": "string",
+      "defaultValue": "contoso.local",
+      "metadata": {
+        "description": "FQDN of the Active Directory forest root domain to create on the Domain Controller."
+      }
+    },
+    "privateIPAddress": {
+      "type": "string",
+      "defaultValue": "10.0.3.4",
+      "metadata": {
+        "description": "Static private IP address to assign to the Domain Controller on the Azure-VMs subnet."
+      }
+    },
+    "virtualNetworkResourceGroupName": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().name]",
+      "metadata": {
+        "description": "Resource group containing the virtual network (deployed by the network template). Defaults to the current resource group."
+      }
+    },
+    "virtualNetworkName": {
+      "type": "string",
+      "defaultValue": "VirtualNetwork",
+      "metadata": {
+        "description": "Name of the existing virtual network."
+      }
+    },
+    "azureVMsSubnetName": {
+      "type": "string",
+      "defaultValue": "Azure-VMs",
+      "metadata": {
+        "description": "Name of the Azure-VMs subnet to attach the Domain Controller NIC to."
+      }
+    },
+    "windowsServerSku": {
+      "type": "string",
+      "defaultValue": "2022-datacenter-azure-edition",
+      "metadata": {
+        "description": "SKU of the Windows Server image used for the Domain Controller."
+      }
+    },
+    "dataDiskSizeGB": {
+      "type": "int",
+      "defaultValue": 32,
+      "metadata": {
+        "description": "Size of the data disk that hosts the AD DS database, logs and SYSVOL."
+      }
+    },
+    "_artifactsLocation": {
+      "type": "string",
+      "defaultValue": "https://raw.githubusercontent.com/jkulbe-msft/AzureVMLabs/main/",
+      "metadata": {
+        "description": "Base URI (with trailing slash) where deployment artifacts (PowerShell scripts) are located."
+      }
+    },
+    "_artifactsLocationSasToken": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional SAS token appended to artifact URIs when artifacts are hosted in a secured storage account."
+      }
+    }
+  },
+  "variables": {
+    "publicIPAddressName": "[format('{0}-pip', parameters('vmName'))]",
+    "networkInterfaceName": "[format('{0}-nic', parameters('vmName'))]",
+    "nsgName": "[format('{0}-nsg', parameters('vmName'))]",
+    "osDiskName": "[format('{0}-osdisk', parameters('vmName'))]",
+    "dataDiskName": "[format('{0}-data', parameters('vmName'))]",
+    "subnetId": "[resourceId(parameters('virtualNetworkResourceGroupName'), 'Microsoft.Network/virtualNetworks/subnets', parameters('virtualNetworkName'), parameters('azureVMsSubnetName'))]",
+    "configureDcScriptUri": "[uri(parameters('_artifactsLocation'), format('scripts/ConfigureDC.ps1{0}', parameters('_artifactsLocationSasToken')))]",
+    "jitPolicyName": "[format('{0}-jit', parameters('vmName'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2023-04-01",
+      "name": "[variables('nsgName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "securityRules": []
+      }
+    },
+    {
+      "type": "Microsoft.Network/publicIPAddresses",
+      "apiVersion": "2023-04-01",
+      "name": "[variables('publicIPAddressName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Standard"
+      },
+      "properties": {
+        "publicIPAllocationMethod": "Static",
+        "publicIPAddressVersion": "IPv4",
+        "idleTimeoutInMinutes": 4
+      }
+    },
+    {
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2023-04-01",
+      "name": "[variables('networkInterfaceName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/publicIPAddresses', variables('publicIPAddressName'))]",
+        "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
+      ],
+      "properties": {
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "privateIPAllocationMethod": "Static",
+              "privateIPAddress": "[parameters('privateIPAddress')]",
+              "subnet": {
+                "id": "[variables('subnetId')]"
+              },
+              "publicIPAddress": {
+                "id": "[resourceId('Microsoft.Network/publicIPAddresses', variables('publicIPAddressName'))]"
+              }
+            }
+          }
+        ],
+        "networkSecurityGroup": {
+          "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2023-09-01",
+      "name": "[parameters('vmName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkInterfaces', variables('networkInterfaceName'))]"
+      ],
+      "properties": {
+        "hardwareProfile": {
+          "vmSize": "[parameters('vmSize')]"
+        },
+        "osProfile": {
+          "computerName": "[parameters('vmName')]",
+          "adminUsername": "[parameters('adminUsername')]",
+          "adminPassword": "[parameters('adminPassword')]",
+          "windowsConfiguration": {
+            "provisionVMAgent": true,
+            "enableAutomaticUpdates": true,
+            "patchSettings": {
+              "patchMode": "AutomaticByOS"
+            }
+          }
+        },
+        "storageProfile": {
+          "imageReference": {
+            "publisher": "MicrosoftWindowsServer",
+            "offer": "WindowsServer",
+            "sku": "[parameters('windowsServerSku')]",
+            "version": "latest"
+          },
+          "osDisk": {
+            "name": "[variables('osDiskName')]",
+            "createOption": "FromImage",
+            "caching": "ReadWrite",
+            "managedDisk": {
+              "storageAccountType": "StandardSSD_LRS"
+            }
+          },
+          "dataDisks": [
+            {
+              "name": "[variables('dataDiskName')]",
+              "lun": 0,
+              "createOption": "Empty",
+              "diskSizeGB": "[parameters('dataDiskSizeGB')]",
+              "caching": "None",
+              "managedDisk": {
+                "storageAccountType": "StandardSSD_LRS"
+              }
+            }
+          ]
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', variables('networkInterfaceName'))]"
+            }
+          ]
+        },
+        "securityProfile": {
+          "securityType": "TrustedLaunch",
+          "uefiSettings": {
+            "secureBootEnabled": true,
+            "vTpmEnabled": true
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "apiVersion": "2023-09-01",
+      "name": "[format('{0}/ConfigureDC', parameters('vmName'))]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
+      ],
+      "properties": {
+        "publisher": "Microsoft.Compute",
+        "type": "CustomScriptExtension",
+        "typeHandlerVersion": "1.10",
+        "autoUpgradeMinorVersion": true,
+        "settings": {
+          "fileUris": [
+            "[variables('configureDcScriptUri')]"
+          ]
+        },
+        "protectedSettings": {
+          "commandToExecute": "[format('powershell -ExecutionPolicy Unrestricted -NoProfile -File ConfigureDC.ps1 -DomainName {0} -SafeModeAdminPassword {1}', parameters('domainName'), parameters('adminPassword'))]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Security/locations/jitNetworkAccessPolicies",
+      "apiVersion": "2020-01-01",
+      "name": "[format('{0}/{1}', parameters('location'), variables('jitPolicyName'))]",
+      "kind": "Basic",
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
+      ],
+      "properties": {
+        "virtualMachines": [
+          {
+            "id": "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]",
+            "ports": [
+              {
+                "number": 3389,
+                "protocol": "*",
+                "allowedSourceAddressPrefix": "*",
+                "maxRequestAccessDuration": "PT3H"
+              },
+              {
+                "number": 5985,
+                "protocol": "*",
+                "allowedSourceAddressPrefix": "*",
+                "maxRequestAccessDuration": "PT3H"
+              },
+              {
+                "number": 5986,
+                "protocol": "*",
+                "allowedSourceAddressPrefix": "*",
+                "maxRequestAccessDuration": "PT3H"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "outputs": {
+    "domainControllerName": {
+      "type": "string",
+      "value": "[parameters('vmName')]"
+    },
+    "domainControllerPrivateIP": {
+      "type": "string",
+      "value": "[parameters('privateIPAddress')]"
+    },
+    "domainName": {
+      "type": "string",
+      "value": "[parameters('domainName')]"
+    }
+  }
+}
