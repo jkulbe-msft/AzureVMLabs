@@ -106,6 +106,7 @@ try {
     Write-Output 'Enabling Hyper-V optional features (DISM)...'
     Enable-WindowsOptionalFeature -Online -FeatureName 'Microsoft-Hyper-V' -All -NoRestart | Out-Null
     Enable-WindowsOptionalFeature -Online -FeatureName 'Microsoft-Hyper-V-Management-PowerShell' -All -NoRestart | Out-Null
+    Add-WindowsFeature -Name RSAT -IncludeAllSubFeature
 
     Write-Output 'Installing RemoteAccess/Routing (for WinNAT) and DHCP Server roles...'
     Install-WindowsFeature -Name RemoteAccess, Routing, DHCP `
