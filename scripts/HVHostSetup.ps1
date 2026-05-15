@@ -99,10 +99,13 @@ try {
     # https://learn.microsoft.com/troubleshoot/azure/virtual-machines/windows/troubleshoot-vm-by-use-nested-virtualization
     # The DISM path doesn't run that check and is the same mechanism Windows client
     # SKUs (Windows 10/11) use to enable Hyper-V on Trusted Launch VMs successfully.
-    # 'Microsoft-Hyper-V-All' is the umbrella feature; with -All it pulls in the
-    # hypervisor, services, PowerShell module and Hyper-V Manager.
-    Write-Output 'Enabling Hyper-V optional feature (DISM)...'
-    Enable-WindowsOptionalFeature -Online -FeatureName 'Microsoft-Hyper-V-All' -All -NoRestart | Out-Null
+    # 'Microsoft-Hyper-V' installs the hypervisor + services; the PowerShell module
+    # (needed by the post-boot task for New-VMSwitch / Get-VMSwitch) is a separate
+    # optional feature on Windows Server and is enabled explicitly below. The -All
+    # switch is a cmdlet parameter that enables parent features, not part of the name.
+    Write-Output 'Enabling Hyper-V optional features (DISM)...'
+    Enable-WindowsOptionalFeature -Online -FeatureName 'Microsoft-Hyper-V' -All -NoRestart | Out-Null
+    Enable-WindowsOptionalFeature -Online -FeatureName 'Microsoft-Hyper-V-Management-PowerShell' -All -NoRestart | Out-Null
 
     Write-Output 'Installing RemoteAccess/Routing (for WinNAT) and DHCP Server roles...'
     Install-WindowsFeature -Name RemoteAccess, Routing, DHCP `
