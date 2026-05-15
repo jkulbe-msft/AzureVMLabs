@@ -47,7 +47,7 @@
     },
     "domainName": {
       "type": "string",
-      "defaultValue": "contoso.local",
+      "defaultValue": "corp.contoso.com",
       "metadata": {
         "description": "FQDN of the Active Directory forest root domain to create on the Domain Controller."
       }
