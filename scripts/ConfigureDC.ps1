@@ -68,6 +68,17 @@ try {
         -NoRebootOnCompletion:$true `
         -Force:$true | Out-Null
 
+    # During bootstrap the NIC's DNS is overridden to the Azure platform resolver
+    # (168.63.129.16) so that the Custom Script Extension can resolve GitHub and
+    # pull this script in the first place - the VNet-level DNS points at this VM
+    # but the DNS role wasn't installed yet. Now that AD DS / DNS is installed,
+    # repoint the DC's own NIC at 127.0.0.1 so AD lookups (_msdcs etc.) resolve
+    # against the DNS service we just promoted, per the Azure DC guidance.
+    Write-Output "Pointing the DC's DNS client at 127.0.0.1 now that the DNS role is installed..."
+    Get-NetAdapter -Physical | Where-Object Status -eq 'Up' | ForEach-Object {
+        Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses '127.0.0.1'
+    }
+
     Write-Output "Domain Controller configuration complete. The VM will reboot to finalize the promotion."
 }
 finally {
