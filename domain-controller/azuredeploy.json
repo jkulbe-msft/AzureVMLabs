@@ -68,7 +68,7 @@
     },
     "virtualNetworkName": {
       "type": "string",
-      "defaultValue": "VirtualNetwork",
+      "defaultValue": "AzureVMLabNetwork",
       "metadata": {
         "description": "Name of the existing virtual network."
       }
