@@ -267,17 +267,57 @@ try {
     Write-Output "  DNS     : $($state.DNSServerAddress)"
 
     # Install AutomatedLab
-    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
-    Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-    Install-Module Automatedlab
+    # All web calls below require TLS 1.2 (PSGallery, GitHub, live.sysinternals.com).
+    # Server 2025 / PowerShell 5.1 defaults to TLS 1.0/1.1, so force 1.2 once up front.
+    Write-Output 'Forcing TLS 1.2 for the current PowerShell session...'
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
+    Write-Output 'Installing the NuGet package provider...'
+    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force | Out-Null
+    Write-Output 'Trusting the PSGallery repository...'
+    Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+    Write-Output 'Installing the AutomatedLab module from PSGallery (this can take a few minutes)...'
+    Install-Module -Name AutomatedLab -Force -AllowClobber -SkipPublisherCheck -Scope AllUsers
+    Write-Output 'AutomatedLab module installed.'
+
+    Write-Output 'Setting AUTOMATEDLAB_TELEMETRY_OPTIN=true (machine and process scope)...'
     [Environment]::SetEnvironmentVariable('AUTOMATEDLAB_TELEMETRY_OPTIN', 'true', 'Machine')
     $env:AUTOMATEDLAB_TELEMETRY_OPTIN = 'true'
-    # Import-Module AutomatedLab -Force
+
+    Write-Output 'Creating the AutomatedLab Lab Sources folder on F:\...'
     New-LabSourcesFolder -DriveLetter F -Force
+    Write-Output 'Enabling AutomatedLab host remoting (CredSSP / TrustedHosts / policy)...'
     Enable-LabHostRemoting -Force
-    Update-LabSysinternalsTools
+
+    # Update-LabSysinternalsTools downloads PsTools from live.sysinternals.com and
+    # has been observed to hang indefinitely on a freshly-imaged Server 2025 host
+    # (workgroup, SYSTEM context, no IE first-run state, COM/BITS quirks). It is
+    # purely a convenience step - none of the LAB1..LAB8 deployment below depends
+    # on it - so run it in a background job with a 5-minute hard timeout and
+    # warn-and-skip on hang or failure instead of blocking the whole post-boot.
+    Write-Output 'Updating Sysinternals tools via AutomatedLab (with 5-minute timeout)...'
+    $sysinternalsJob = Start-Job -ScriptBlock {
+        try {
+            Import-Module AutomatedLab -Force -ErrorAction Stop
+            Update-LabSysinternalsTools
+        }
+        catch {
+            Write-Output "Update-LabSysinternalsTools failed inside job: $($_.Exception.Message)"
+        }
+    }
+    if (Wait-Job -Job $sysinternalsJob -Timeout 300) {
+        Receive-Job -Job $sysinternalsJob | ForEach-Object { Write-Output "  [sysinternals] $_" }
+        Write-Output 'Sysinternals tools update finished.'
+    }
+    else {
+        Write-Warning 'Update-LabSysinternalsTools did not complete within 5 minutes; stopping the job and continuing.'
+        Stop-Job -Job $sysinternalsJob -ErrorAction SilentlyContinue
+    }
+    Remove-Job -Job $sysinternalsJob -Force -ErrorAction SilentlyContinue
+
+    Write-Output 'Setting AutomatedLab PSFConfig: DoNotWaitForLinux = true...'
     Set-PSFConfig -Module AutomatedLab -Name DoNotWaitForLinux -Value $true
+    Write-Output 'AutomatedLab setup complete.'
 
     # Pre-stage a Windows 11 ISO into F:\LabSources\ISOs so AutomatedLab can use it as
     # an OS source without a manual download. The fwlink resolves to the current
