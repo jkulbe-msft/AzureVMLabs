@@ -132,6 +132,35 @@ Start-Transcript -Path "$env:SystemDrive\HVHostPostBoot.log" -Append
 try {
     $state = Get-Content -Path "$env:SystemDrive\AzureVMLabs\HVHostSetup.state.json" -Raw | ConvertFrom-Json
 
+    # The scheduled task is triggered AtStartup, which can fire before the Hyper-V
+    # Virtual Machine Management Service (vmms) has finished initializing its WMI
+    # provider. Calling New-VMSwitch / Get-VMSwitch before then fails with:
+    #   "Hyper-V encountered an error trying to access an object on computer
+    #    'HVHOST' because the object was not found..."
+    # Wait for vmms to reach Running and for Get-VMHost (a cheap WMI round-trip)
+    # to succeed before touching any Hyper-V cmdlets.
+    Write-Output 'Waiting for Hyper-V Virtual Machine Management Service (vmms) to be ready...'
+    $vmmsDeadline = (Get-Date).AddMinutes(5)
+    while ((Get-Date) -lt $vmmsDeadline) {
+        $svc = Get-Service -Name vmms -ErrorAction SilentlyContinue
+        if ($svc -and $svc.Status -eq 'Running') {
+            try {
+                Get-VMHost -ErrorAction Stop | Out-Null
+                break
+            }
+            catch {
+                # WMI provider not ready yet; keep polling.
+            }
+        }
+        elseif ($svc -and $svc.Status -ne 'Running' -and $svc.StartType -ne 'Disabled') {
+            try { Start-Service -Name vmms -ErrorAction Stop } catch { }
+        }
+        Start-Sleep -Seconds 5
+    }
+    if ((Get-Date) -ge $vmmsDeadline) {
+        throw "Timed out waiting for the Hyper-V Virtual Machine Management Service (vmms) to become ready."
+    }
+
     if (-not (Get-VMSwitch -Name 'NestedSwitch' -ErrorAction SilentlyContinue)) {
         Write-Output "Creating internal Hyper-V virtual switch 'NestedSwitch'..."
         New-VMSwitch -Name 'NestedSwitch' -SwitchType Internal | Out-Null
