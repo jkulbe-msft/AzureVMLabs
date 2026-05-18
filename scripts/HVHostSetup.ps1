@@ -266,6 +266,69 @@ try {
     Write-Output "  Gateway : $($state.HostVNicIP)"
     Write-Output "  DNS     : $($state.DNSServerAddress)"
 
+    # Install AutomatedLab
+    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
+    Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+    Install-Module Automatedlab
+
+    [Environment]::SetEnvironmentVariable('AUTOMATEDLAB_TELEMETRY_OPTIN', 'true', 'Machine')
+    $env:AUTOMATEDLAB_TELEMETRY_OPTIN = 'true'
+    # Import-Module AutomatedLab -Force
+    New-LabSourcesFolder -DriveLetter F -Force
+    Enable-LabHostRemoting -Force
+    Update-LabSysinternalsTools
+    Set-PSFConfig -Module AutomatedLab -Name DoNotWaitForLinux -Value $true
+
+    # Pre-stage a Windows 11 ISO into F:\LabSources\ISOs so AutomatedLab can use it as
+    # an OS source without a manual download. The fwlink resolves to the current
+    # multi-edition Win11 English (US) ISO. Best-effort: any failure (no internet,
+    # link change, BITS unavailable, disk full, etc.) is logged as a warning and the
+    # post-boot task continues - AutomatedLab itself works fine without the ISO and
+    # the user can drop one in later.
+    $isoDir  = 'F:\LabSources\ISOs'
+    $isoPath = Join-Path $isoDir 'Windows11.iso'
+    $isoUrl  = 'https://go.microsoft.com/fwlink/?linkid=2334167&clcid=0x409&culture=en-us&country=us'
+    try {
+        if (-not (Test-Path $isoDir)) {
+            New-Item -ItemType Directory -Path $isoDir -Force | Out-Null
+        }
+        if (Test-Path $isoPath) {
+            Write-Output "Windows 11 ISO already present at $isoPath; skipping download."
+        }
+        else {
+            Write-Output "Downloading Windows 11 ISO to $isoPath..."
+            # BITS streams straight to disk and survives transient network blips, which
+            # matters for a multi-GB ISO. Fall back to Invoke-WebRequest if BITS isn't
+            # available (service disabled, etc.).
+            $bitsOk = $false
+            try {
+                Start-BitsTransfer -Source $isoUrl -Destination $isoPath -ErrorAction Stop
+                $bitsOk = $true
+            }
+            catch {
+                Write-Warning "BITS transfer failed ($($_.Exception.Message)); falling back to Invoke-WebRequest."
+            }
+            if (-not $bitsOk) {
+                $progPref = $ProgressPreference
+                $ProgressPreference = 'SilentlyContinue'  # massively faster for large downloads
+                try {
+                    Invoke-WebRequest -Uri $isoUrl -OutFile $isoPath -UseBasicParsing -ErrorAction Stop
+                }
+                finally {
+                    $ProgressPreference = $progPref
+                }
+            }
+            Write-Output "Windows 11 ISO download complete."
+        }
+    }
+    catch {
+        Write-Warning "Failed to stage Windows 11 ISO at $isoPath`: $($_.Exception.Message). Continuing without it."
+        if ((Test-Path $isoPath) -and ((Get-Item $isoPath).Length -lt 100MB)) {
+            # Remove a partial / truncated download so a future re-run will retry cleanly.
+            Remove-Item -Path $isoPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     Unregister-ScheduledTask -TaskName 'HVHostPostBoot' -Confirm:$false -ErrorAction SilentlyContinue
 }
 finally {
