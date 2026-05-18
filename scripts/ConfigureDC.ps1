@@ -75,9 +75,22 @@ try {
     # repoint the DC's own NIC at 127.0.0.1 so AD lookups (_msdcs etc.) resolve
     # against the DNS service we just promoted, per the Azure DC guidance.
     Write-Output "Pointing the DC's DNS client at 127.0.0.1 now that the DNS role is installed..."
-    Get-NetAdapter -Physical | Where-Object Status -eq 'Up' | ForEach-Object {
-        Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses '127.0.0.1'
-    }
+    Get-NetIPConfiguration -ErrorAction SilentlyContinue |
+        Where-Object { $_.NetAdapter -and $_.NetAdapter.Status -eq 'Up' -and $_.IPv4Address } |
+        ForEach-Object {
+            try {
+                Set-DnsClientServerAddress -InterfaceIndex $_.InterfaceIndex `
+                    -ServerAddresses '127.0.0.1' `
+                    -AddressFamily IPv4 `
+                    -ErrorAction Stop
+            }
+            catch {
+                # Non-fatal: the NIC-level dnsSettings override in the ARM template still
+                # makes outbound DNS work via 168.63.129.16. AD will still come up; the
+                # DC just won't query itself for lookups until DNS client is repaired.
+                Write-Warning "Could not set DNS on interface $($_.InterfaceAlias) (ifIndex $($_.InterfaceIndex)): $($_.Exception.Message)"
+            }
+        }
 
     Write-Output "Domain Controller configuration complete. The VM will reboot to finalize the promotion."
 }
