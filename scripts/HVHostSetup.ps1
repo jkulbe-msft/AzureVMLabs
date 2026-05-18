@@ -352,17 +352,24 @@ try {
             # Get-WindowsAutopilotInfo script and writes the device's hardware hash
             # CSV to C:\HWID\<COMPUTERNAME>.csv. The host then copies the CSV out
             # and renames are unnecessary because the VMs are already named LAB1..LAB8.
-            $captureScriptContent = @'
-$ErrorActionPreference = 'Stop'
-if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
-    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force | Out-Null
-}
-Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-Install-Script -Name Get-WindowsAutopilotInfo -Force | Out-Null
-New-Item -ItemType Directory -Path C:\HWID -Force | Out-Null
-$csv = "C:\HWID\$($env:COMPUTERNAME).csv"
-& "$env:ProgramFiles\WindowsPowerShell\Scripts\Get-WindowsAutopilotInfo.ps1" -OutputFile $csv
-'@
+            #
+            # NOTE: this is intentionally NOT a nested here-string (@'...'@). The
+            # outer post-boot script is itself a single-quoted here-string in
+            # HVHostSetup.ps1, and a nested '@ at column 1 would terminate the
+            # outer here-string prematurely and break parsing of HVHostSetup.ps1.
+            # Building the content from an array of single-quoted lines avoids
+            # that gotcha entirely.
+            $captureScriptContent = @(
+                '$ErrorActionPreference = ''Stop'''
+                'if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {'
+                '    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force | Out-Null'
+                '}'
+                'Set-PSRepository -Name PSGallery -InstallationPolicy Trusted'
+                'Install-Script -Name Get-WindowsAutopilotInfo -Force | Out-Null'
+                'New-Item -ItemType Directory -Path C:\HWID -Force | Out-Null'
+                '$csv = "C:\HWID\$($env:COMPUTERNAME).csv"'
+                '& "$env:ProgramFiles\WindowsPowerShell\Scripts\Get-WindowsAutopilotInfo.ps1" -OutputFile $csv'
+            ) -join [Environment]::NewLine
             Set-Content -Path $captureScript -Value $captureScriptContent -Encoding UTF8
 
             foreach ($labName in (1..8 | ForEach-Object { "LAB$_" })) {
