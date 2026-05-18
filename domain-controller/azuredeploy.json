@@ -173,6 +173,11 @@
         ],
         "networkSecurityGroup": {
           "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
+        },
+        "dnsSettings": {
+          "dnsServers": [
+            "168.63.129.16"
+          ]
         }
       },
       "dependsOn": [
