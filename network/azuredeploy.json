@@ -19,7 +19,7 @@
     },
     "virtualNetworkName": {
       "type": "string",
-      "defaultValue": "VirtualNetwork",
+      "defaultValue": "AzureVMLabNetwork",
       "metadata": {
         "description": "Name of the virtual network."
       }
@@ -58,6 +58,13 @@
       "metadata": {
         "description": "Address prefix of the Azure-VMs subnet."
       }
+    },
+    "dnsServerAddress": {
+      "type": "string",
+      "defaultValue": "10.0.3.4",
+      "metadata": {
+        "description": "IP address of the DNS server used by VMs on this virtual network (the Domain Controller)."
+      }
     }
   },
   "resources": [
@@ -84,6 +91,11 @@
         "addressSpace": {
           "addressPrefixes": [
             "[parameters('virtualNetworkAddressPrefix')]"
+          ]
+        },
+        "dhcpOptions": {
+          "dnsServers": [
+            "[parameters('dnsServerAddress')]"
           ]
         },
         "subnets": [
@@ -133,6 +145,10 @@
     "virtualNetworkAddressPrefix": {
       "type": "string",
       "value": "[parameters('virtualNetworkAddressPrefix')]"
+    },
+    "dnsServerAddress": {
+      "type": "string",
+      "value": "[parameters('dnsServerAddress')]"
     }
   }
 }
