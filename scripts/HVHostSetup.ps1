@@ -329,6 +329,132 @@ try {
         }
     }
 
+    # Deploy 8 AutomatedLab labs (LAB1..LAB8), each containing a single Windows 11 VM
+    # with 4 GB dynamic memory, attached to the existing 'NestedSwitch' internal switch
+    # so the VM gets DHCP / DNS / NAT from this host. For each VM we then:
+    #   1. Run Get-WindowsAutopilotInfo inside the guest and write the hash to
+    #      C:\HWID\<COMPUTERNAME>.csv (so LAB1.csv .. LAB8.csv).
+    #   2. Pull the CSV onto the host at F:\LabSources\Autopilot\LAB<n>.csv.
+    #   3. Sysprep /generalize /oobe /shutdown so the VM is sealed back to OOBE.
+    #   4. Snapshot the powered-off VM as 'AutopilotReady' so the demo can revert to
+    #      a clean, pre-enrolled-device state on every run.
+    # The whole block is best-effort: any per-lab failure is logged and we move on to
+    # the next one; if the ISO never made it onto disk we skip the block entirely.
+    $autopilotDir     = 'F:\LabSources\Autopilot'
+    $captureScriptDir = 'F:\LabSources\CustomAssets\Scripts'
+    $captureScript    = Join-Path $captureScriptDir 'CaptureHash.ps1'
+    if (Test-Path $isoPath) {
+        try {
+            if (-not (Test-Path $autopilotDir))     { New-Item -ItemType Directory -Path $autopilotDir     -Force | Out-Null }
+            if (-not (Test-Path $captureScriptDir)) { New-Item -ItemType Directory -Path $captureScriptDir -Force | Out-Null }
+
+            # CaptureHash.ps1 runs inside each lab VM. Installs the community
+            # Get-WindowsAutopilotInfo script and writes the device's hardware hash
+            # CSV to C:\HWID\<COMPUTERNAME>.csv. The host then copies the CSV out
+            # and renames are unnecessary because the VMs are already named LAB1..LAB8.
+            $captureScriptContent = @'
+$ErrorActionPreference = 'Stop'
+if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
+    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force | Out-Null
+}
+Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+Install-Script -Name Get-WindowsAutopilotInfo -Force | Out-Null
+New-Item -ItemType Directory -Path C:\HWID -Force | Out-Null
+$csv = "C:\HWID\$($env:COMPUTERNAME).csv"
+& "$env:ProgramFiles\WindowsPowerShell\Scripts\Get-WindowsAutopilotInfo.ps1" -OutputFile $csv
+'@
+            Set-Content -Path $captureScript -Value $captureScriptContent -Encoding UTF8
+
+            foreach ($labName in (1..8 | ForEach-Object { "LAB$_" })) {
+                try {
+                    # Skip labs that already exist so re-runs of the post-boot task are
+                    # idempotent and don't blow away in-progress work.
+                    $labRoot = Join-Path (Get-LabSourcesLocation) ('Labs\' + $labName)
+                    if (Test-Path $labRoot) {
+                        Write-Output "Lab '$labName' already exists at $labRoot; skipping."
+                        continue
+                    }
+
+                    Write-Output "Defining lab '$labName'..."
+                    New-LabDefinition -Name $labName -DefaultVirtualizationEngine HyperV -VmPath 'F:\Hyper-V\VirtualMachines'
+                    Add-LabIsoImageDefinition -Name Win11 -Path $isoPath
+
+                    # Re-declare the network definition so AutomatedLab attaches the
+                    # machine to the existing 'NestedSwitch' (internal) we created
+                    # earlier in this same post-boot script. -AddressSpace matches
+                    # the nested subnet so AutomatedLab doesn't try to invent one.
+                    Add-LabVirtualNetworkDefinition `
+                        -Name 'NestedSwitch' `
+                        -HyperVProperties @{ SwitchType = 'Internal' } `
+                        -AddressSpace $state.NestedSubnetPrefix
+
+                    # Use DHCP from the host-side DHCP scope (set up earlier) so the
+                    # VM gets the host vNIC as default gateway and the DC as DNS.
+                    $nic = New-LabNetworkAdapterDefinition -VirtualSwitch 'NestedSwitch' -UseDhcp
+
+                    Add-LabMachineDefinition `
+                        -Name $labName `
+                        -OperatingSystem 'Windows 11 Pro' `
+                        -Memory    4GB `
+                        -MinMemory 512MB `
+                        -MaxMemory 4GB `
+                        -NetworkAdapter $nic
+
+                    Write-Output "Installing lab '$labName' (Windows 11)..."
+                    Install-Lab
+
+                    Write-Output "Capturing Autopilot hash for '$labName'..."
+                    Invoke-LabCommand -ComputerName $labName -FilePath $captureScript -NoDisplay
+
+                    # Pull the CSV onto the host as F:\LabSources\Autopilot\LAB<n>.csv.
+                    $hostCsv = Join-Path $autopilotDir ($labName + '.csv')
+                    $csvContent = Invoke-LabCommand -ComputerName $labName -ScriptBlock {
+                        Get-Content -Path ("C:\HWID\" + $env:COMPUTERNAME + ".csv") -Raw
+                    } -PassThru -NoDisplay
+                    if ($csvContent) {
+                        Set-Content -Path $hostCsv -Value $csvContent -Encoding UTF8
+                        Write-Output "Autopilot hash for '$labName' saved to $hostCsv."
+                    }
+                    else {
+                        Write-Warning "No Autopilot hash CSV captured from '$labName'."
+                    }
+
+                    # Sysprep /generalize /oobe /shutdown without -Wait: WinRM will
+                    # be torn down when the VM shuts down, which would otherwise hang
+                    # Invoke-LabCommand. Poll Get-VM state from the host instead.
+                    Write-Output "Sysprep'ing '$labName' back to OOBE and shutting it down..."
+                    Invoke-LabCommand -ComputerName $labName -ScriptBlock {
+                        Start-Process -FilePath "$env:SystemRoot\System32\Sysprep\Sysprep.exe" `
+                                      -ArgumentList '/generalize /oobe /shutdown /quiet'
+                    } -NoDisplay
+
+                    $shutdownDeadline = (Get-Date).AddMinutes(30)
+                    while ((Get-Date) -lt $shutdownDeadline) {
+                        $vm = Get-VM -Name $labName -ErrorAction SilentlyContinue
+                        if ($vm -and $vm.State -eq 'Off') { break }
+                        Start-Sleep -Seconds 10
+                    }
+                    if (((Get-VM -Name $labName -ErrorAction SilentlyContinue).State) -ne 'Off') {
+                        Write-Warning "'$labName' did not shut down within the deadline; forcing stop before snapshot."
+                        Stop-VM -Name $labName -TurnOff -Force -ErrorAction SilentlyContinue
+                    }
+
+                    Write-Output "Snapshotting '$labName' as 'AutopilotReady'..."
+                    Checkpoint-VM -Name $labName -SnapshotName 'AutopilotReady'
+                }
+                catch {
+                    Write-Warning "Lab '$labName' setup failed: $($_.Exception.Message). Continuing with the next lab."
+                }
+            }
+        }
+        catch {
+            Write-Warning "AutomatedLab deployment block failed: $($_.Exception.Message). Continuing."
+        }
+    }
+    else {
+        Write-Warning "Windows 11 ISO not present at $isoPath; skipping LAB1..LAB8 deployment."
+    }
+
     Unregister-ScheduledTask -TaskName 'HVHostPostBoot' -Confirm:$false -ErrorAction SilentlyContinue
 }
 finally {
