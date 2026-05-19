@@ -286,8 +286,64 @@ try {
 
     Write-Output 'Creating the AutomatedLab Lab Sources folder on F:\...'
     New-LabSourcesFolder -DriveLetter F -Force
-    Write-Output 'Enabling AutomatedLab host remoting (CredSSP / TrustedHosts / policy)...'
-    Enable-LabHostRemoting -Force
+
+    # Enable-LabHostRemoting -Force has been observed to hang indefinitely on a
+    # freshly-imaged Server 2025 host running under SYSTEM (no interactive console).
+    # The transcript shows it completes all four of the steps it announces
+    # (CredSSP Client, TrustedHosts, AllowFreshCredentialsWhenNTLMOnly,
+    # AllowFreshCredentials) and then blocks on an internal follow-up call
+    # (Enable-PSRemoting retry / WinRM listener restart) that wants an interactive
+    # console. As a defence in depth, also apply those same four settings
+    # directly via Enable-WSManCredSSP / WSMan:\localhost\Client\TrustedHosts /
+    # the CredentialsDelegation policy registry keys BEFORE invoking the
+    # AutomatedLab cmdlet, so if the cmdlet hangs and we time it out the
+    # configuration the lab deployment actually needs is still in place.
+    Write-Output 'Pre-applying CredSSP / TrustedHosts / credential delegation policy directly...'
+    try {
+        Enable-WSManCredSSP -Role Client -DelegateComputer '*' -Force | Out-Null
+    }
+    catch {
+        Write-Warning "Enable-WSManCredSSP failed: $($_.Exception.Message)"
+    }
+    try {
+        Set-Item -Path WSMan:\localhost\Client\TrustedHosts -Value '*' -Force | Out-Null
+    }
+    catch {
+        Write-Warning "Setting TrustedHosts failed: $($_.Exception.Message)"
+    }
+    $credDelegationRoot = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CredentialsDelegation'
+    foreach ($policy in @('AllowFreshCredentials', 'AllowFreshCredentialsWhenNTLMOnly')) {
+        try {
+            $policyKey = Join-Path $credDelegationRoot $policy
+            if (-not (Test-Path $policyKey)) { New-Item -Path $policyKey -Force | Out-Null }
+            New-ItemProperty -Path $credDelegationRoot -Name $policy                          -PropertyType DWord  -Value 1     -Force | Out-Null
+            New-ItemProperty -Path $credDelegationRoot -Name "Concatenate${policy}_AllowFresh" -PropertyType DWord  -Value 1     -Force | Out-Null
+            New-ItemProperty -Path $policyKey          -Name '1'                              -PropertyType String -Value 'WSMAN/*' -Force | Out-Null
+        }
+        catch {
+            Write-Warning "Setting credential delegation policy '$policy' failed: $($_.Exception.Message)"
+        }
+    }
+
+    Write-Output 'Enabling AutomatedLab host remoting (CredSSP / TrustedHosts / policy) with 3-minute timeout...'
+    $remotingJob = Start-Job -ScriptBlock {
+        try {
+            Import-Module AutomatedLab -Force -ErrorAction Stop
+            Enable-LabHostRemoting -Force
+        }
+        catch {
+            Write-Output "Enable-LabHostRemoting failed inside job: $($_.Exception.Message)"
+        }
+    }
+    if (Wait-Job -Job $remotingJob -Timeout 180) {
+        Receive-Job -Job $remotingJob | ForEach-Object { Write-Output "  [remoting] $_" }
+        Write-Output 'Enable-LabHostRemoting finished.'
+    }
+    else {
+        Write-Warning 'Enable-LabHostRemoting did not complete within 3 minutes; stopping the job and continuing. CredSSP / TrustedHosts / policy were already applied directly above.'
+        Stop-Job -Job $remotingJob -ErrorAction SilentlyContinue
+    }
+    Remove-Job -Job $remotingJob -Force -ErrorAction SilentlyContinue
 
     # Update-LabSysinternalsTools downloads PsTools from live.sysinternals.com and
     # has been observed to hang indefinitely on a freshly-imaged Server 2025 host
@@ -412,6 +468,27 @@ try {
             ) -join [Environment]::NewLine
             Set-Content -Path $captureScript -Value $captureScriptContent -Encoding UTF8
 
+            # The Windows 11 fwlink ISO is a multi-edition image whose actual
+            # OperatingSystemName (as seen by AutomatedLab) varies by build - e.g.
+            # 'Windows 11 Pro', 'Windows 11 Enterprise Evaluation', etc. Hard-coding
+            # one of those names breaks Add-LabMachineDefinition when MS rev's the
+            # ISO. Ask AutomatedLab what it actually sees inside the ISO and pick
+            # the first edition. Preference order: Pro > Enterprise > anything.
+            Write-Output "Detecting OperatingSystemName from $isoPath via Get-LabAvailableOperatingSystem..."
+            $availableOs = Get-LabAvailableOperatingSystem -Path $isoPath
+            if (-not $availableOs) {
+                throw "Get-LabAvailableOperatingSystem returned nothing for $isoPath."
+            }
+            $preferredOs = $availableOs | Where-Object { $_.OperatingSystemName -match 'Windows 11 Pro' } | Select-Object -First 1
+            if (-not $preferredOs) {
+                $preferredOs = $availableOs | Where-Object { $_.OperatingSystemName -match 'Windows 11 Enterprise' } | Select-Object -First 1
+            }
+            if (-not $preferredOs) {
+                $preferredOs = $availableOs | Select-Object -First 1
+            }
+            $operatingSystemName = $preferredOs.OperatingSystemName
+            Write-Output "Selected operating system: '$operatingSystemName'."
+
             foreach ($labName in (1..8 | ForEach-Object { "LAB$_" })) {
                 try {
                     # Skip labs that already exist so re-runs of the post-boot task are
@@ -441,13 +518,13 @@ try {
 
                     Add-LabMachineDefinition `
                         -Name $labName `
-                        -OperatingSystem 'Windows 11 Pro' `
+                        -OperatingSystem $operatingSystemName `
                         -Memory    4GB `
                         -MinMemory 512MB `
                         -MaxMemory 4GB `
                         -NetworkAdapter $nic
 
-                    Write-Output "Installing lab '$labName' (Windows 11)..."
+                    Write-Output "Installing lab '$labName' ($operatingSystemName)..."
                     Install-Lab
 
                     Write-Output "Capturing Autopilot hash for '$labName'..."
