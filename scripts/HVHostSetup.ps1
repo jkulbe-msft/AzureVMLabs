@@ -439,8 +439,40 @@ try {
     $autopilotDir     = 'F:\LabSources\Autopilot'
     $captureScriptDir = 'F:\LabSources\CustomAssets\Scripts'
     $captureScript    = Join-Path $captureScriptDir 'CaptureHash.ps1'
+
+    function Wait-LabRemotingReady {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory = $true)] [string]$ComputerName,
+            [int]$TimeoutMinutes = 25,
+            [int]$PollSeconds = 20
+        )
+
+        $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
+        while ((Get-Date) -lt $deadline) {
+            try {
+                $probe = Invoke-LabCommand -ComputerName $ComputerName -ScriptBlock { 'READY' } -PassThru -NoDisplay -ErrorAction Stop
+                if ($probe -match 'READY') {
+                    return $true
+                }
+            }
+            catch {
+                # VM is still booting / configuring WinRM; keep waiting.
+            }
+            Start-Sleep -Seconds $PollSeconds
+        }
+
+        return $false
+    }
+
     if (Test-Path $isoPath) {
         try {
+            # AutomatedLab uses non-terminating errors internally for control flow.
+            # Keep those non-terminating while running AL commands and restore strict
+            # error handling for the rest of this script afterwards.
+            $scriptEapBackup = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+
             if (-not (Test-Path $autopilotDir))     { New-Item -ItemType Directory -Path $autopilotDir     -Force | Out-Null }
             if (-not (Test-Path $captureScriptDir)) { New-Item -ItemType Directory -Path $captureScriptDir -Force | Out-Null }
 
@@ -501,7 +533,7 @@ try {
 
                     Write-Output "Defining lab '$labName'..."
                     New-LabDefinition -Name $labName -DefaultVirtualizationEngine HyperV -VmPath 'F:\Hyper-V\VirtualMachines'
-                    Add-LabIsoImageDefinition -Name Win11 -Path $isoPath
+                    Add-LabIsoImageDefinition -Name "Win11-$labName" -Path $isoPath
 
                     # Re-declare the network definition so AutomatedLab attaches the
                     # machine to the existing 'NestedSwitch' (internal) we created
@@ -527,8 +559,28 @@ try {
                     Write-Output "Installing lab '$labName' ($operatingSystemName)..."
                     Install-Lab
 
+                    Write-Output "Waiting for remoting to become available on '$labName'..."
+                    if (-not (Wait-LabRemotingReady -ComputerName $labName -TimeoutMinutes 25 -PollSeconds 20)) {
+                        throw "Remoting did not become ready on '$labName' within the timeout window."
+                    }
+
                     Write-Output "Capturing Autopilot hash for '$labName'..."
-                    Invoke-LabCommand -ComputerName $labName -FilePath $captureScript -NoDisplay
+                    $captureSuccess = $false
+                    for ($attempt = 1; $attempt -le 3 -and -not $captureSuccess; $attempt++) {
+                        try {
+                            Invoke-LabCommand -ComputerName $labName -FilePath $captureScript -NoDisplay -ErrorAction Stop
+                            $captureSuccess = $true
+                        }
+                        catch {
+                            if ($attempt -lt 3) {
+                                Write-Warning "Autopilot capture attempt $attempt failed on '$labName': $($_.Exception.Message). Retrying in 30 seconds..."
+                                Start-Sleep -Seconds 30
+                            }
+                            else {
+                                throw
+                            }
+                        }
+                    }
 
                     # Pull the CSV onto the host as F:\LabSources\Autopilot\LAB<n>.csv.
                     $hostCsv = Join-Path $autopilotDir ($labName + '.csv')
@@ -573,6 +625,11 @@ try {
         }
         catch {
             Write-Warning "AutomatedLab deployment block failed: $($_.Exception.Message). Continuing."
+        }
+        finally {
+            if ($scriptEapBackup) {
+                $ErrorActionPreference = $scriptEapBackup
+            }
         }
     }
     else {
