@@ -12,7 +12,7 @@ Each component ships as a self-contained `azuredeploy.json` ARM template with a 
 | 2 | Domain Controller | [`domain-controller/`](./domain-controller) | A `Standard_B2s_v2` Windows Server **2025 Azure Edition (Hotpatch)** VM on the `Azure-VMs` subnet (static IP `10.0.3.4`), with the AD DS database, logs and SYSVOL placed on a separate data disk whose host caching is set to `None`, following [Deploy AD DS on an Azure VM](https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/deploy/virtual-dc/adds-on-azure-vm). Patching uses `AutomaticByPlatform` with `enableHotpatching: true`, as required by Hotpatch-compatible images. The public IP is intended to be protected by Just-In-Time (JIT) access. |
 | 3 | Hyper-V host | [`hyper-v-host/`](./hyper-v-host) | A `Standard_D8as_v7` Windows Server **2025 Azure Edition (Hotpatch)** VM (`MicrosoftWindowsServer` / `WindowsServer` / `2025-datacenter-azure-edition`) on the `NAT` subnet with Hyper-V enabled and an internal switch wired up via the WinNAT stack (`New-NetNat`) plus an in-box DHCP scope so nested VMs get DHCP, outbound internet, and reach the DC for DNS. Patching uses `AutomaticByPlatform` with `enableHotpatching: true`. The host is **not** domain-joined. The public IP is intended to be protected by JIT. |
 
-All three templates default to **North Europe** and prompt for the resource group at deployment time.
+All three templates use the selected **resource group location** and prompt for the resource group at deployment time (recommended: **swedencentral**).
 
 > Deploy them in order: **Network → Domain Controller → Hyper-V Host**. The latter two assume the network and (for the Hyper-V host) the Domain Controller are already in place.
 
@@ -24,7 +24,7 @@ You can deploy either with the Azure CLI or with the **Deploy to Azure** button.
 
 ```powershell
 # 1. Network
-az group create -n AzureVMLabs -l northeurope
+az group create -n AzureVMLabs -l swedencentral
 az deployment group create -g AzureVMLabs -f network/azuredeploy.json
 
 # 2. Domain Controller
@@ -42,7 +42,7 @@ az deployment group create -g AzureVMLabs -f hyper-v-host/azuredeploy.json `
 
 [![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fjkulbe-msft%2FAzureVMLabs%2Fmain%2Fnetwork%2Fazuredeploy.json)
 
-Default location: **northeurope**.
+Location comes from the selected resource group.
 
 #### 2. Domain Controller (`Standard_B2s_v2`, Windows Server 2025 Azure Edition, Hotpatch)
 

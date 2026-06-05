@@ -10,13 +10,6 @@
     "description": "Deploys a Windows Server 2025 Azure Edition (Hotpatch) VM that acts as a nested Hyper-V host. The VM has a single NIC on the NAT subnet, a public IP intended to be protected by Just-In-Time (JIT) access, Hyper-V enabled, and an internal virtual switch wired up via the WinNAT stack (New-NetNat) with an in-box DHCP scope so that nested VMs receive DHCP, outbound internet connectivity, and reach the Azure VNet (including the Domain Controller for DNS). The host is NOT domain-joined."
   },
   "parameters": {
-    "location": {
-      "type": "string",
-      "defaultValue": "northeurope",
-      "metadata": {
-        "description": "Location for all Hyper-V host resources."
-      }
-    },
     "vmName": {
       "type": "string",
       "defaultValue": "HVHOST",
@@ -138,7 +131,7 @@
       "type": "Microsoft.Network/networkSecurityGroups",
       "apiVersion": "2024-05-01",
       "name": "[variables('nsgName')]",
-      "location": "[parameters('location')]",
+      "location": "[resourceGroup().location]",
       "properties": {
         "securityRules": []
       }
@@ -147,7 +140,7 @@
       "type": "Microsoft.Network/publicIPAddresses",
       "apiVersion": "2024-05-01",
       "name": "[variables('publicIPAddressName')]",
-      "location": "[parameters('location')]",
+      "location": "[resourceGroup().location]",
       "sku": {
         "name": "Standard"
       },
@@ -164,7 +157,7 @@
       "type": "Microsoft.Network/networkInterfaces",
       "apiVersion": "2024-05-01",
       "name": "[variables('nicName')]",
-      "location": "[parameters('location')]",
+      "location": "[resourceGroup().location]",
       "properties": {
         "ipConfigurations": [
           {
@@ -194,7 +187,7 @@
       "type": "Microsoft.Compute/virtualMachines",
       "apiVersion": "2024-07-01",
       "name": "[parameters('vmName')]",
-      "location": "[parameters('location')]",
+      "location": "[resourceGroup().location]",
       "properties": {
         "hardwareProfile": {
           "vmSize": "[parameters('vmSize')]"
@@ -269,7 +262,7 @@
       "type": "Microsoft.Compute/virtualMachines/extensions",
       "apiVersion": "2024-07-01",
       "name": "[format('{0}/{1}', parameters('vmName'), 'HVHostSetup')]",
-      "location": "[parameters('location')]",
+      "location": "[resourceGroup().location]",
       "properties": {
         "publisher": "Microsoft.Compute",
         "type": "CustomScriptExtension",
@@ -292,7 +285,7 @@
       "type": "Microsoft.DevTestLab/schedules",
       "apiVersion": "2018-09-15",
       "name": "[variables('autoShutdownScheduleName')]",
-      "location": "[parameters('location')]",
+      "location": "[resourceGroup().location]",
       "properties": {
         "status": "Enabled",
         "taskType": "ComputeVmShutdownTask",
@@ -313,7 +306,7 @@
     {
       "type": "Microsoft.Security/locations/jitNetworkAccessPolicies",
       "apiVersion": "2020-01-01",
-      "name": "[format('{0}/{1}', parameters('location'), variables('jitPolicyName'))]",
+      "name": "[format('{0}/{1}', resourceGroup().location, variables('jitPolicyName'))]",
       "kind": "Basic",
       "properties": {
         "virtualMachines": [

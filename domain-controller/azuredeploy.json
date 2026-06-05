@@ -10,13 +10,6 @@
     "description": "Deploys a Windows Server 2025 Azure Edition VM acting as a Domain Controller, following https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/deploy/virtual-dc/adds-on-azure-vm. The AD DS database, logs and SYSVOL are placed on a separate data disk with host caching set to None. The VM uses Hotpatch (AutomaticByPlatform) and is attached to the Azure-VMs subnet with a static private IP and a public IP intended to be protected by Just-In-Time (JIT) access."
   },
   "parameters": {
-    "location": {
-      "type": "string",
-      "defaultValue": "northeurope",
-      "metadata": {
-        "description": "Location for all Domain Controller resources."
-      }
-    },
     "vmName": {
       "type": "string",
       "defaultValue": "DC01",
@@ -131,7 +124,7 @@
       "type": "Microsoft.Network/networkSecurityGroups",
       "apiVersion": "2024-05-01",
       "name": "[variables('nsgName')]",
-      "location": "[parameters('location')]",
+      "location": "[resourceGroup().location]",
       "properties": {
         "securityRules": []
       }
@@ -140,7 +133,7 @@
       "type": "Microsoft.Network/publicIPAddresses",
       "apiVersion": "2024-05-01",
       "name": "[variables('publicIPAddressName')]",
-      "location": "[parameters('location')]",
+      "location": "[resourceGroup().location]",
       "sku": {
         "name": "Standard"
       },
@@ -154,7 +147,7 @@
       "type": "Microsoft.Network/networkInterfaces",
       "apiVersion": "2024-05-01",
       "name": "[variables('networkInterfaceName')]",
-      "location": "[parameters('location')]",
+      "location": "[resourceGroup().location]",
       "properties": {
         "ipConfigurations": [
           {
@@ -189,7 +182,7 @@
       "type": "Microsoft.Compute/virtualMachines",
       "apiVersion": "2024-07-01",
       "name": "[parameters('vmName')]",
-      "location": "[parameters('location')]",
+      "location": "[resourceGroup().location]",
       "properties": {
         "hardwareProfile": {
           "vmSize": "[parameters('vmSize')]"
@@ -264,7 +257,7 @@
       "type": "Microsoft.Compute/virtualMachines/extensions",
       "apiVersion": "2024-07-01",
       "name": "[format('{0}/{1}', parameters('vmName'), 'ConfigureDC')]",
-      "location": "[parameters('location')]",
+      "location": "[resourceGroup().location]",
       "properties": {
         "publisher": "Microsoft.Compute",
         "type": "CustomScriptExtension",
@@ -287,7 +280,7 @@
       "type": "Microsoft.DevTestLab/schedules",
       "apiVersion": "2018-09-15",
       "name": "[variables('autoShutdownScheduleName')]",
-      "location": "[parameters('location')]",
+      "location": "[resourceGroup().location]",
       "properties": {
         "status": "Enabled",
         "taskType": "ComputeVmShutdownTask",
@@ -308,7 +301,7 @@
     {
       "type": "Microsoft.Security/locations/jitNetworkAccessPolicies",
       "apiVersion": "2020-01-01",
-      "name": "[format('{0}/{1}', parameters('location'), variables('jitPolicyName'))]",
+      "name": "[format('{0}/{1}', resourceGroup().location, variables('jitPolicyName'))]",
       "kind": "Basic",
       "properties": {
         "virtualMachines": [

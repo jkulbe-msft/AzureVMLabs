@@ -10,13 +10,6 @@
     "description": "Deploys the virtual network infrastructure used by the AzureVMLabs demo environment. Two subnets are defined: NAT (for the Hyper-V host) and Azure-VMs (for the Domain Controller and any other Azure-hosted VMs). Nested VMs sit behind the Hyper-V host on an internal Hyper-V switch and reach the network through host-side NAT, so no Azure subnet is required for them."
   },
   "parameters": {
-    "location": {
-      "type": "string",
-      "defaultValue": "northeurope",
-      "metadata": {
-        "description": "Location for all network resources."
-      }
-    },
     "virtualNetworkName": {
       "type": "string",
       "defaultValue": "AzureVMLabNetwork",
@@ -72,21 +65,21 @@
       "type": "Microsoft.Network/networkSecurityGroups",
       "apiVersion": "2024-05-01",
       "name": "[format('{0}NSG', parameters('natSubnetName'))]",
-      "location": "[parameters('location')]",
+      "location": "[resourceGroup().location]",
       "properties": {}
     },
     {
       "type": "Microsoft.Network/networkSecurityGroups",
       "apiVersion": "2024-05-01",
       "name": "[format('{0}NSG', parameters('azureVMsSubnetName'))]",
-      "location": "[parameters('location')]",
+      "location": "[resourceGroup().location]",
       "properties": {}
     },
     {
       "type": "Microsoft.Network/virtualNetworks",
       "apiVersion": "2024-05-01",
       "name": "[parameters('virtualNetworkName')]",
-      "location": "[parameters('location')]",
+      "location": "[resourceGroup().location]",
       "properties": {
         "addressSpace": {
           "addressPrefixes": [
