@@ -471,7 +471,14 @@ try {
             # Keep those non-terminating while running AL commands and restore strict
             # error handling for the rest of this script afterwards.
             $scriptEapBackup = $ErrorActionPreference
+            $scriptConfirmBackup = $ConfirmPreference
+            $scriptConfirmDefaultBackupExists = $PSDefaultParameterValues.ContainsKey('*:Confirm')
+            if ($scriptConfirmDefaultBackupExists) {
+                $scriptConfirmDefaultBackup = $PSDefaultParameterValues['*:Confirm']
+            }
             $ErrorActionPreference = 'Continue'
+            $ConfirmPreference = 'None'
+            $PSDefaultParameterValues['*:Confirm'] = $false
 
             if (-not (Test-Path $autopilotDir))     { New-Item -ItemType Directory -Path $autopilotDir     -Force | Out-Null }
             if (-not (Test-Path $captureScriptDir)) { New-Item -ItemType Directory -Path $captureScriptDir -Force | Out-Null }
@@ -556,8 +563,8 @@ try {
                         -MaxMemory 4GB `
                         -NetworkAdapter $nic
 
-                    Write-Output "Installing lab '$labName' ($operatingSystemName)..."
-                    Install-Lab
+                    Write-Output "Installing lab '$labName' ($operatingSystemName) with checkpoints disabled..."
+                    Install-Lab -CreateCheckPoints:$false
 
                     Write-Output "Waiting for remoting to become available on '$labName'..."
                     if (-not (Wait-LabRemotingReady -ComputerName $labName -TimeoutMinutes 25 -PollSeconds 20)) {
@@ -629,6 +636,15 @@ try {
         finally {
             if ($scriptEapBackup) {
                 $ErrorActionPreference = $scriptEapBackup
+            }
+            if ($scriptConfirmBackup) {
+                $ConfirmPreference = $scriptConfirmBackup
+            }
+            if ($scriptConfirmDefaultBackupExists) {
+                $PSDefaultParameterValues['*:Confirm'] = $scriptConfirmDefaultBackup
+            }
+            else {
+                [void]$PSDefaultParameterValues.Remove('*:Confirm')
             }
         }
     }
