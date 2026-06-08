@@ -20,7 +20,7 @@
     },
     "vmSize": {
       "type": "string",
-      "defaultValue": "Standard_D8as_v7",
+      "defaultValue": "Standard_D8as_v6",
       "metadata": {
         "description": "Size of the Hyper-V host VM. Default is Standard_D8as_v7 which supports nested virtualization."
       }
