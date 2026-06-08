@@ -451,7 +451,13 @@ try {
         $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
         while ((Get-Date) -lt $deadline) {
             try {
-                $probe = Invoke-LabCommand -ComputerName $ComputerName -ScriptBlock { 'READY' } -PassThru -NoDisplay -ErrorAction Stop
+                # Use SilentlyContinue, NOT Stop. With -ErrorAction Stop, AutomatedLab's
+                # internal "port is closed after 2 retries" condition is raised as a
+                # *terminating* error (TerminatingError(New-LabPSSession)) that can
+                # propagate into AL's own error handling and tear the half-built lab
+                # down. SilentlyContinue lets us poll quietly and just get $null back
+                # until the guest's WinRM answers.
+                $probe = Invoke-LabCommand -ComputerName $ComputerName -ScriptBlock { 'READY' } -PassThru -NoDisplay -ErrorAction SilentlyContinue
                 if ($probe -match 'READY') {
                     return $true
                 }
@@ -528,7 +534,15 @@ try {
             $operatingSystemName = $preferredOs.OperatingSystemName
             Write-Output "Selected operating system: '$operatingSystemName'."
 
-            foreach ($labName in (1..8 | ForEach-Object { "LAB$_" })) {
+            # Static IPs for the nested guests are derived from the host vNIC's
+            # subnet (e.g. host 10.0.2.1 -> LAB1 10.0.2.2 ... LAB8 10.0.2.9). They
+            # sit BELOW the DHCP scope (which starts at .10) so they never collide
+            # with a lease, and they give AutomatedLab a fixed, known address to
+            # remote into on the internal switch.
+            $nestedOctetBase = ($state.HostVNicIP -replace '\.\d+$', '')
+
+            foreach ($i in 1..8) {
+                $labName = "LAB$i"
                 try {
                     # Skip labs that already exist so re-runs of the post-boot task are
                     # idempotent and don't blow away in-progress work.
@@ -551,9 +565,21 @@ try {
                         -HyperVProperties @{ SwitchType = 'Internal' } `
                         -AddressSpace $state.NestedSubnetPrefix
 
-                    # Use DHCP from the host-side DHCP scope (set up earlier) so the
-                    # VM gets the host vNIC as default gateway and the DC as DNS.
-                    $nic = New-LabNetworkAdapterDefinition -VirtualSwitch 'NestedSwitch' -UseDhcp
+                    # Assign a STATIC IP instead of using DHCP. On a custom
+                    # *internal* Hyper-V switch (unlike Hyper-V's "Default Switch")
+                    # there is no built-in name resolution, so AutomatedLab cannot
+                    # reliably discover a DHCP-assigned guest IP and every
+                    # New-LabPSSession then fails with "port is closed". A static IP
+                    # that AutomatedLab bakes into the guest's unattend file lets it
+                    # connect to a known address - the supported pattern for internal
+                    # switches. Gateway = host vNIC, DNS = the DC. Internet (for the
+                    # Autopilot script install) still flows out via the host's NAT.
+                    $labIp = '{0}.{1}' -f $nestedOctetBase, ($i + 1)
+                    $nic = New-LabNetworkAdapterDefinition `
+                        -VirtualSwitch  'NestedSwitch' `
+                        -Ipv4Address    $labIp `
+                        -Ipv4Gateway    $state.HostVNicIP `
+                        -Ipv4DNSServers $state.DNSServerAddress
 
                     Add-LabMachineDefinition `
                         -Name $labName `
@@ -568,7 +594,11 @@ try {
 
                     Write-Output "Waiting for remoting to become available on '$labName'..."
                     if (-not (Wait-LabRemotingReady -ComputerName $labName -TimeoutMinutes 25 -PollSeconds 20)) {
-                        throw "Remoting did not become ready on '$labName' within the timeout window."
+                        # Do NOT throw. Leave the VM in place for diagnostics instead
+                        # of letting a terminating remoting error tear the lab down;
+                        # the VM can then be inspected / RDP'd into and retried.
+                        Write-Warning "Remoting did not become ready on '$labName' within the timeout window; leaving the VM in place and skipping Autopilot capture for this lab."
+                        continue
                     }
 
                     Write-Output "Capturing Autopilot hash for '$labName'..."
