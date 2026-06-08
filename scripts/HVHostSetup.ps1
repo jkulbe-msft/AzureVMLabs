@@ -611,19 +611,30 @@ try {
                                       -ArgumentList '/generalize /oobe /shutdown /quiet'
                     } -NoDisplay
 
+                    # A machine that completes 'sysprep /generalize /oobe /shutdown'
+                    # powers itself off. A clean self-shutdown within the deadline is
+                    # therefore our signal that generalize succeeded and the VM will
+                    # boot into OOBE next time. If it never powers off we force-stop
+                    # it, but in that case sysprep almost certainly failed (e.g. an
+                    # AppX provisioning error logged to C:\Windows\System32\Sysprep\
+                    # Panther\setupact.log), so the VM is NOT in an OOBE state and we
+                    # must NOT label a checkpoint 'AutopilotReady'.
+                    $syspreptedOff   = $false
                     $shutdownDeadline = (Get-Date).AddMinutes(30)
                     while ((Get-Date) -lt $shutdownDeadline) {
                         $vm = Get-VM -Name $labName -ErrorAction SilentlyContinue
-                        if ($vm -and $vm.State -eq 'Off') { break }
+                        if ($vm -and $vm.State -eq 'Off') { $syspreptedOff = $true; break }
                         Start-Sleep -Seconds 10
                     }
-                    if (((Get-VM -Name $labName -ErrorAction SilentlyContinue).State) -ne 'Off') {
-                        Write-Warning "'$labName' did not shut down within the deadline; forcing stop before snapshot."
+
+                    if (-not $syspreptedOff) {
+                        Write-Warning "'$labName' did not power off within the deadline; sysprep likely failed, so the VM is not in an OOBE state. Forcing stop and skipping the 'AutopilotReady' checkpoint."
                         Stop-VM -Name $labName -TurnOff -Force -ErrorAction SilentlyContinue
                     }
-
-                    Write-Output "Snapshotting '$labName' as 'AutopilotReady'..."
-                    Checkpoint-VM -Name $labName -SnapshotName 'AutopilotReady'
+                    else {
+                        Write-Output "Snapshotting powered-off, sysprepped '$labName' as 'AutopilotReady'..."
+                        Checkpoint-VM -Name $labName -SnapshotName 'AutopilotReady'
+                    }
                 }
                 catch {
                     Write-Warning "Lab '$labName' setup failed: $($_.Exception.Message). Continuing with the next lab."
