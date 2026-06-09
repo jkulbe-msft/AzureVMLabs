@@ -124,7 +124,10 @@
     "dataDiskName": "[format('{0}-datadisk', parameters('vmName'))]",
     "jitPolicyName": "[format('{0}-jit', parameters('vmName'))]",
     "autoShutdownScheduleName": "[format('shutdown-computevm-{0}', parameters('vmName'))]",
-    "hvHostSetupScriptUri": "[uri(parameters('_artifactsLocation'), format('scripts/HVHostSetup.ps1{0}', parameters('_artifactsLocationSasToken')))]"
+    "hvHostSetupScriptUri": "[uri(parameters('_artifactsLocation'), format('scripts/HVHostSetup.ps1{0}', parameters('_artifactsLocationSasToken')))]",
+    "newGoldenImageScriptUri": "[uri(parameters('_artifactsLocation'), format('scripts/New-GoldenImage.ps1{0}', parameters('_artifactsLocationSasToken')))]",
+    "newLabVMsScriptUri": "[uri(parameters('_artifactsLocation'), format('scripts/New-LabVMs.ps1{0}', parameters('_artifactsLocationSasToken')))]",
+    "getAutopilotHashScriptUri": "[uri(parameters('_artifactsLocation'), format('scripts/Get-AutopilotHash.ps1{0}', parameters('_artifactsLocationSasToken')))]"
   },
   "resources": [
     {
@@ -270,7 +273,10 @@
         "autoUpgradeMinorVersion": true,
         "settings": {
           "fileUris": [
-            "[variables('hvHostSetupScriptUri')]"
+            "[variables('hvHostSetupScriptUri')]",
+            "[variables('newGoldenImageScriptUri')]",
+            "[variables('newLabVMsScriptUri')]",
+            "[variables('getAutopilotHashScriptUri')]"
           ]
         },
         "protectedSettings": {

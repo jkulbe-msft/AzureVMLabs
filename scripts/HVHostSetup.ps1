@@ -15,6 +15,9 @@
       Phase 1 (this script, run by the Custom Script Extension):
         * Installs the Hyper-V, RemoteAccess/Routing and DHCP-Server roles + tools.
         * Persists state needed by phase 2 (nested subnet, DC IP, derived host IP).
+        * Stages the nested-VM helper scripts (New-GoldenImage.ps1, New-LabVMs.ps1
+          and Get-AutopilotHash.ps1, downloaded alongside this script by the Custom
+          Script Extension) under C:\AzureVMLabs\Scripts so they survive the reboot.
         * Registers a one-shot "HVHostPostBoot" scheduled task that runs at startup.
         * Reboots the host (after letting the extension report success).
 
@@ -38,6 +41,11 @@
           service, and creates a scope for the nested subnet that hands out the host
           vNIC IP as the default gateway (option 003) and the Domain Controller IP as
           the DNS server (option 006).
+        * Downloads the latest public Windows 11 ISO and, with the staged helper
+          scripts, builds a bootable golden VHDX (New-GoldenImage.ps1) and creates
+          six Generation 2 lab VMs (New-LabVMs.ps1) on "NestedSwitch" - 4 vCPU,
+          dynamic memory 2-4 GB, Secure Boot + vTPM - each booted to OOBE and
+          checkpointed as "OOBE". No AutomatedLab is involved; only in-box tooling.
         * Unregisters itself so it only runs once.
 
     Nested VMs attached to "NestedSwitch" with their NIC left at "Obtain an IP address
@@ -150,10 +158,12 @@ try {
             }
             catch {
                 # WMI provider not ready yet; keep polling.
+                Write-Verbose "vmms WMI provider not ready yet: $($_.Exception.Message)"
             }
         }
         elseif ($svc -and $svc.Status -ne 'Running' -and $svc.StartType -ne 'Disabled') {
-            try { Start-Service -Name vmms -ErrorAction Stop } catch { }
+            try { Start-Service -Name vmms -ErrorAction Stop }
+            catch { Write-Verbose "Start-Service vmms failed (will retry): $($_.Exception.Message)" }
         }
         Start-Sleep -Seconds 5
     }
@@ -266,136 +276,75 @@ try {
     Write-Output "  Gateway : $($state.HostVNicIP)"
     Write-Output "  DNS     : $($state.DNSServerAddress)"
 
-    # Install AutomatedLab
-    # All web calls below require TLS 1.2 (PSGallery, GitHub, live.sysinternals.com).
-    # Server 2025 / PowerShell 5.1 defaults to TLS 1.0/1.1, so force 1.2 once up front.
+    # ----------------------------------------------------------------------------
+    # Nested lab VM provisioning (golden-VHDX approach; no AutomatedLab).
+    #
+    #   1. Download the latest public Windows 11 ISO (consumer multi-edition
+    #      fwlink, which resolves to Windows 11 Pro) into F:\VMLABSource\ISOs.
+    #   2. Build a bootable golden VHDX from that ISO with New-GoldenImage.ps1
+    #      (in-box DISM: Expand-WindowsImage + bcdboot). Because each lab VM boots
+    #      from this *applied* disk rather than from the ISO, the "Press any key to
+    #      boot from CD or DVD..." prompt never appears and can't stall an
+    #      unattended boot.
+    #   3. Create 6 Generation 2 lab VMs from independent full copies of that VHDX
+    #      with New-LabVMs.ps1 (4 vCPU, dynamic memory 2-4 GB, Secure Boot + vTPM,
+    #      attached to NestedSwitch for DHCP / DNS / NAT) and checkpoint each at
+    #      OOBE.
+    #
+    # The three helper scripts (New-GoldenImage.ps1, New-LabVMs.ps1 and
+    # Get-AutopilotHash.ps1) were downloaded next to HVHostSetup.ps1 by the Custom
+    # Script Extension and staged to C:\AzureVMLabs\Scripts by phase 1 so they
+    # survive this reboot. Everything below is best-effort: failures are logged and
+    # the host is still left in a usable state with the switch / NAT / DHCP ready.
+    # ----------------------------------------------------------------------------
+
+    # The Windows 11 ISO fwlink download requires TLS 1.2. Server 2025 /
+    # PowerShell 5.1 defaults to TLS 1.0/1.1, so force 1.2 once up front.
     Write-Output 'Forcing TLS 1.2 for the current PowerShell session...'
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-    Write-Output 'Installing the NuGet package provider...'
-    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force | Out-Null
-    Write-Output 'Trusting the PSGallery repository...'
-    Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-    Write-Output 'Installing the AutomatedLab module from PSGallery (this can take a few minutes)...'
-    Install-Module -Name AutomatedLab -Force -AllowClobber -SkipPublisherCheck -Scope AllUsers
-    Write-Output 'AutomatedLab module installed.'
+    # VMLABSource is this solution's equivalent of an AutomatedLab "LabSources"
+    # folder, deliberately named differently so it never collides with a real
+    # AutomatedLab install if one is ever added to this host.
+    $vmLabSource  = 'F:\VMLABSource'
+    $isoDir       = Join-Path $vmLabSource 'ISOs'
+    $scriptsDir   = Join-Path $vmLabSource 'Scripts'
+    $goldenDir    = Join-Path $vmLabSource 'GoldenImages'
+    $vhdDir       = Join-Path $vmLabSource 'VHDs'
+    $autopilotDir = Join-Path $vmLabSource 'Autopilot'
+    foreach ($d in @($vmLabSource, $isoDir, $scriptsDir, $goldenDir, $vhdDir, $autopilotDir)) {
+        if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+    }
 
-    Write-Output 'Setting AUTOMATEDLAB_TELEMETRY_OPTIN=true (machine and process scope)...'
-    [Environment]::SetEnvironmentVariable('AUTOMATEDLAB_TELEMETRY_OPTIN', 'true', 'Machine')
-    $env:AUTOMATEDLAB_TELEMETRY_OPTIN = 'true'
+    # Copy the helper scripts staged on the OS disk onto the data disk so they live
+    # alongside the images they manage and can be re-run by hand later.
+    $stagedScripts = Join-Path "$env:SystemDrive\AzureVMLabs" 'Scripts'
+    foreach ($helper in @('New-GoldenImage.ps1', 'New-LabVMs.ps1', 'Get-AutopilotHash.ps1')) {
+        $src = Join-Path $stagedScripts $helper
+        if (Test-Path $src) {
+            Copy-Item -Path $src -Destination (Join-Path $scriptsDir $helper) -Force
+        }
+        else {
+            Write-Warning "Helper script '$helper' was not staged at $src; the matching step may be skipped."
+        }
+    }
 
-    Write-Output 'Creating the AutomatedLab Lab Sources folder on F:\...'
-    New-LabSourcesFolder -DriveLetter F -Force
+    $newGoldenImage = Join-Path $scriptsDir 'New-GoldenImage.ps1'
+    $newLabVMs      = Join-Path $scriptsDir 'New-LabVMs.ps1'
+    $goldenVhdxPath = Join-Path $goldenDir 'Win11.vhdx'
+    $isoPath        = Join-Path $isoDir 'Windows11.iso'
+    $isoUrl         = 'https://go.microsoft.com/fwlink/?linkid=2334167&clcid=0x409&culture=en-us&country=us'
 
-    # Enable-LabHostRemoting -Force has been observed to hang indefinitely on a
-    # freshly-imaged Server 2025 host running under SYSTEM (no interactive console).
-    # The transcript shows it completes all four of the steps it announces
-    # (CredSSP Client, TrustedHosts, AllowFreshCredentialsWhenNTLMOnly,
-    # AllowFreshCredentials) and then blocks on an internal follow-up call
-    # (Enable-PSRemoting retry / WinRM listener restart) that wants an interactive
-    # console. As a defence in depth, also apply those same four settings
-    # directly via Enable-WSManCredSSP / WSMan:\localhost\Client\TrustedHosts /
-    # the CredentialsDelegation policy registry keys BEFORE invoking the
-    # AutomatedLab cmdlet, so if the cmdlet hangs and we time it out the
-    # configuration the lab deployment actually needs is still in place.
-    Write-Output 'Pre-applying CredSSP / TrustedHosts / credential delegation policy directly...'
+    # --- Step 1: download the Windows 11 ISO (best-effort) ----------------------
     try {
-        Enable-WSManCredSSP -Role Client -DelegateComputer '*' -Force | Out-Null
-    }
-    catch {
-        Write-Warning "Enable-WSManCredSSP failed: $($_.Exception.Message)"
-    }
-    try {
-        Set-Item -Path WSMan:\localhost\Client\TrustedHosts -Value '*' -Force | Out-Null
-    }
-    catch {
-        Write-Warning "Setting TrustedHosts failed: $($_.Exception.Message)"
-    }
-    $credDelegationRoot = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CredentialsDelegation'
-    foreach ($policy in @('AllowFreshCredentials', 'AllowFreshCredentialsWhenNTLMOnly')) {
-        try {
-            $policyKey = Join-Path $credDelegationRoot $policy
-            if (-not (Test-Path $policyKey)) { New-Item -Path $policyKey -Force | Out-Null }
-            New-ItemProperty -Path $credDelegationRoot -Name $policy                          -PropertyType DWord  -Value 1     -Force | Out-Null
-            New-ItemProperty -Path $credDelegationRoot -Name "Concatenate${policy}_AllowFresh" -PropertyType DWord  -Value 1     -Force | Out-Null
-            New-ItemProperty -Path $policyKey          -Name '1'                              -PropertyType String -Value 'WSMAN/*' -Force | Out-Null
-        }
-        catch {
-            Write-Warning "Setting credential delegation policy '$policy' failed: $($_.Exception.Message)"
-        }
-    }
-
-    Write-Output 'Enabling AutomatedLab host remoting (CredSSP / TrustedHosts / policy) with 3-minute timeout...'
-    $remotingJob = Start-Job -ScriptBlock {
-        try {
-            Import-Module AutomatedLab -Force -ErrorAction Stop
-            Enable-LabHostRemoting -Force
-        }
-        catch {
-            Write-Output "Enable-LabHostRemoting failed inside job: $($_.Exception.Message)"
-        }
-    }
-    if (Wait-Job -Job $remotingJob -Timeout 180) {
-        Receive-Job -Job $remotingJob | ForEach-Object { Write-Output "  [remoting] $_" }
-        Write-Output 'Enable-LabHostRemoting finished.'
-    }
-    else {
-        Write-Warning 'Enable-LabHostRemoting did not complete within 3 minutes; stopping the job and continuing. CredSSP / TrustedHosts / policy were already applied directly above.'
-        Stop-Job -Job $remotingJob -ErrorAction SilentlyContinue
-    }
-    Remove-Job -Job $remotingJob -Force -ErrorAction SilentlyContinue
-
-    # Update-LabSysinternalsTools downloads PsTools from live.sysinternals.com and
-    # has been observed to hang indefinitely on a freshly-imaged Server 2025 host
-    # (workgroup, SYSTEM context, no IE first-run state, COM/BITS quirks). It is
-    # purely a convenience step - none of the LAB1..LAB8 deployment below depends
-    # on it - so run it in a background job with a 5-minute hard timeout and
-    # warn-and-skip on hang or failure instead of blocking the whole post-boot.
-    Write-Output 'Updating Sysinternals tools via AutomatedLab (with 5-minute timeout)...'
-    $sysinternalsJob = Start-Job -ScriptBlock {
-        try {
-            Import-Module AutomatedLab -Force -ErrorAction Stop
-            Update-LabSysinternalsTools
-        }
-        catch {
-            Write-Output "Update-LabSysinternalsTools failed inside job: $($_.Exception.Message)"
-        }
-    }
-    if (Wait-Job -Job $sysinternalsJob -Timeout 300) {
-        Receive-Job -Job $sysinternalsJob | ForEach-Object { Write-Output "  [sysinternals] $_" }
-        Write-Output 'Sysinternals tools update finished.'
-    }
-    else {
-        Write-Warning 'Update-LabSysinternalsTools did not complete within 5 minutes; stopping the job and continuing.'
-        Stop-Job -Job $sysinternalsJob -ErrorAction SilentlyContinue
-    }
-    Remove-Job -Job $sysinternalsJob -Force -ErrorAction SilentlyContinue
-
-    Write-Output 'Setting AutomatedLab PSFConfig: DoNotWaitForLinux = true...'
-    Set-PSFConfig -Module AutomatedLab -Name DoNotWaitForLinux -Value $true
-    Write-Output 'AutomatedLab setup complete.'
-
-    # Pre-stage a Windows 11 ISO into F:\LabSources\ISOs so AutomatedLab can use it as
-    # an OS source without a manual download. The fwlink resolves to the current
-    # multi-edition Win11 English (US) ISO. Best-effort: any failure (no internet,
-    # link change, BITS unavailable, disk full, etc.) is logged as a warning and the
-    # post-boot task continues - AutomatedLab itself works fine without the ISO and
-    # the user can drop one in later.
-    $isoDir  = 'F:\LabSources\ISOs'
-    $isoPath = Join-Path $isoDir 'Windows11.iso'
-    $isoUrl  = 'https://go.microsoft.com/fwlink/?linkid=2334167&clcid=0x409&culture=en-us&country=us'
-    try {
-        if (-not (Test-Path $isoDir)) {
-            New-Item -ItemType Directory -Path $isoDir -Force | Out-Null
-        }
         if (Test-Path $isoPath) {
             Write-Output "Windows 11 ISO already present at $isoPath; skipping download."
         }
         else {
             Write-Output "Downloading Windows 11 ISO to $isoPath..."
-            # BITS streams straight to disk and survives transient network blips, which
-            # matters for a multi-GB ISO. Fall back to Invoke-WebRequest if BITS isn't
-            # available (service disabled, etc.).
+            # BITS streams straight to disk and survives transient network blips,
+            # which matters for a multi-GB ISO. Fall back to Invoke-WebRequest if
+            # BITS isn't available (service disabled, etc.).
             $bitsOk = $false
             try {
                 Start-BitsTransfer -Source $isoUrl -Destination $isoPath -ErrorAction Stop
@@ -414,283 +363,48 @@ try {
                     $ProgressPreference = $progPref
                 }
             }
-            Write-Output "Windows 11 ISO download complete."
+            Write-Output 'Windows 11 ISO download complete.'
         }
     }
     catch {
-        Write-Warning "Failed to stage Windows 11 ISO at $isoPath`: $($_.Exception.Message). Continuing without it."
+        Write-Warning "Failed to download the Windows 11 ISO at $isoPath`: $($_.Exception.Message)."
         if ((Test-Path $isoPath) -and ((Get-Item $isoPath).Length -lt 100MB)) {
-            # Remove a partial / truncated download so a future re-run will retry cleanly.
+            # Remove a partial / truncated download so a future re-run retries cleanly.
             Remove-Item -Path $isoPath -Force -ErrorAction SilentlyContinue
         }
     }
 
-    # Deploy 8 AutomatedLab labs (LAB1..LAB8), each containing a single Windows 11 VM
-    # with 4 GB dynamic memory, attached to the existing 'NestedSwitch' internal switch
-    # so the VM gets DHCP / DNS / NAT from this host. For each VM we then:
-    #   1. Run Get-WindowsAutopilotInfo inside the guest and write the hash to
-    #      C:\HWID\<COMPUTERNAME>.csv (so LAB1.csv .. LAB8.csv).
-    #   2. Pull the CSV onto the host at F:\LabSources\Autopilot\LAB<n>.csv.
-    #   3. Sysprep /generalize /oobe /shutdown so the VM is sealed back to OOBE.
-    #   4. Snapshot the powered-off VM as 'AutopilotReady' so the demo can revert to
-    #      a clean, pre-enrolled-device state on every run.
-    # The whole block is best-effort: any per-lab failure is logged and we move on to
-    # the next one; if the ISO never made it onto disk we skip the block entirely.
-    $autopilotDir     = 'F:\LabSources\Autopilot'
-    $captureScriptDir = 'F:\LabSources\CustomAssets\Scripts'
-    $captureScript    = Join-Path $captureScriptDir 'CaptureHash.ps1'
-
-    function Wait-LabRemotingReady {
-        [CmdletBinding()]
-        param(
-            [Parameter(Mandatory = $true)] [string]$ComputerName,
-            [int]$TimeoutMinutes = 25,
-            [int]$PollSeconds = 20
-        )
-
-        $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
-        while ((Get-Date) -lt $deadline) {
+    # --- Step 2: build the golden VHDX (skip if it already exists) --------------
+    if ((Test-Path $isoPath) -and (Test-Path $newGoldenImage)) {
+        if (Test-Path $goldenVhdxPath) {
+            Write-Output "Golden image already present at $goldenVhdxPath; skipping build."
+        }
+        else {
+            Write-Output "Building golden VHDX from $isoPath (this can take a while)..."
             try {
-                # Use SilentlyContinue, NOT Stop. With -ErrorAction Stop, AutomatedLab's
-                # internal "port is closed after 2 retries" condition is raised as a
-                # *terminating* error (TerminatingError(New-LabPSSession)) that can
-                # propagate into AL's own error handling and tear the half-built lab
-                # down. SilentlyContinue lets us poll quietly and just get $null back
-                # until the guest's WinRM answers.
-                $probe = Invoke-LabCommand -ComputerName $ComputerName -ScriptBlock { 'READY' } -PassThru -NoDisplay -ErrorAction SilentlyContinue
-                if ($probe -match 'READY') {
-                    return $true
-                }
+                & $newGoldenImage -IsoPath $isoPath -VhdxPath $goldenVhdxPath
             }
             catch {
-                # VM is still booting / configuring WinRM; keep waiting.
-            }
-            Start-Sleep -Seconds $PollSeconds
-        }
-
-        return $false
-    }
-
-    if (Test-Path $isoPath) {
-        try {
-            # AutomatedLab uses non-terminating errors internally for control flow.
-            # Keep those non-terminating while running AL commands and restore strict
-            # error handling for the rest of this script afterwards.
-            $scriptEapBackup = $ErrorActionPreference
-            $scriptConfirmBackup = $ConfirmPreference
-            $scriptConfirmDefaultBackupExists = $PSDefaultParameterValues.ContainsKey('*:Confirm')
-            if ($scriptConfirmDefaultBackupExists) {
-                $scriptConfirmDefaultBackup = $PSDefaultParameterValues['*:Confirm']
-            }
-            $ErrorActionPreference = 'Continue'
-            $ConfirmPreference = 'None'
-            $PSDefaultParameterValues['*:Confirm'] = $false
-
-            if (-not (Test-Path $autopilotDir))     { New-Item -ItemType Directory -Path $autopilotDir     -Force | Out-Null }
-            if (-not (Test-Path $captureScriptDir)) { New-Item -ItemType Directory -Path $captureScriptDir -Force | Out-Null }
-
-            # CaptureHash.ps1 runs inside each lab VM. Installs the community
-            # Get-WindowsAutopilotInfo script and writes the device's hardware hash
-            # CSV to C:\HWID\<COMPUTERNAME>.csv. The host then copies the CSV out
-            # and renames are unnecessary because the VMs are already named LAB1..LAB8.
-            #
-            # NOTE: this is intentionally NOT a nested here-string (@'...'@). The
-            # outer post-boot script is itself a single-quoted here-string in
-            # HVHostSetup.ps1, and a nested '@ at column 1 would terminate the
-            # outer here-string prematurely and break parsing of HVHostSetup.ps1.
-            # Building the content from an array of single-quoted lines avoids
-            # that gotcha entirely.
-            $captureScriptContent = @(
-                '$ErrorActionPreference = ''Stop'''
-                'if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {'
-                '    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force | Out-Null'
-                '}'
-                'Set-PSRepository -Name PSGallery -InstallationPolicy Trusted'
-                'Install-Script -Name Get-WindowsAutopilotInfo -Force | Out-Null'
-                'New-Item -ItemType Directory -Path C:\HWID -Force | Out-Null'
-                '$csv = "C:\HWID\$($env:COMPUTERNAME).csv"'
-                '& "$env:ProgramFiles\WindowsPowerShell\Scripts\Get-WindowsAutopilotInfo.ps1" -OutputFile $csv'
-            ) -join [Environment]::NewLine
-            Set-Content -Path $captureScript -Value $captureScriptContent -Encoding UTF8
-
-            # The Windows 11 fwlink ISO is a multi-edition image whose actual
-            # OperatingSystemName (as seen by AutomatedLab) varies by build - e.g.
-            # 'Windows 11 Pro', 'Windows 11 Enterprise Evaluation', etc. Hard-coding
-            # one of those names breaks Add-LabMachineDefinition when MS rev's the
-            # ISO. Ask AutomatedLab what it actually sees inside the ISO and pick
-            # the first edition. Preference order: Pro > Enterprise > anything.
-            Write-Output "Detecting OperatingSystemName from $isoPath via Get-LabAvailableOperatingSystem..."
-            $availableOs = Get-LabAvailableOperatingSystem -Path $isoPath
-            if (-not $availableOs) {
-                throw "Get-LabAvailableOperatingSystem returned nothing for $isoPath."
-            }
-            $preferredOs = $availableOs | Where-Object { $_.OperatingSystemName -match 'Windows 11 Pro' } | Select-Object -First 1
-            if (-not $preferredOs) {
-                $preferredOs = $availableOs | Where-Object { $_.OperatingSystemName -match 'Windows 11 Enterprise' } | Select-Object -First 1
-            }
-            if (-not $preferredOs) {
-                $preferredOs = $availableOs | Select-Object -First 1
-            }
-            $operatingSystemName = $preferredOs.OperatingSystemName
-            Write-Output "Selected operating system: '$operatingSystemName'."
-
-            # Static IPs for the nested guests are derived from the host vNIC's
-            # subnet (e.g. host 10.0.2.1 -> LAB1 10.0.2.2 ... LAB8 10.0.2.9). They
-            # sit BELOW the DHCP scope (which starts at .10) so they never collide
-            # with a lease, and they give AutomatedLab a fixed, known address to
-            # remote into on the internal switch.
-            $nestedOctetBase = ($state.HostVNicIP -replace '\.\d+$', '')
-
-            foreach ($i in 1..8) {
-                $labName = "LAB$i"
-                try {
-                    # Skip labs that already exist so re-runs of the post-boot task are
-                    # idempotent and don't blow away in-progress work.
-                    $labRoot = Join-Path (Get-LabSourcesLocation) ('Labs\' + $labName)
-                    if (Test-Path $labRoot) {
-                        Write-Output "Lab '$labName' already exists at $labRoot; skipping."
-                        continue
-                    }
-
-                    Write-Output "Defining lab '$labName'..."
-                    New-LabDefinition -Name $labName -DefaultVirtualizationEngine HyperV -VmPath 'F:\Hyper-V\VirtualMachines'
-                    Add-LabIsoImageDefinition -Name "Win11-$labName" -Path $isoPath
-
-                    # Re-declare the network definition so AutomatedLab attaches the
-                    # machine to the existing 'NestedSwitch' (internal) we created
-                    # earlier in this same post-boot script. -AddressSpace matches
-                    # the nested subnet so AutomatedLab doesn't try to invent one.
-                    Add-LabVirtualNetworkDefinition `
-                        -Name 'NestedSwitch' `
-                        -HyperVProperties @{ SwitchType = 'Internal' } `
-                        -AddressSpace $state.NestedSubnetPrefix
-
-                    # Assign a STATIC IP instead of using DHCP. On a custom
-                    # *internal* Hyper-V switch (unlike Hyper-V's "Default Switch")
-                    # there is no built-in name resolution, so AutomatedLab cannot
-                    # reliably discover a DHCP-assigned guest IP and every
-                    # New-LabPSSession then fails with "port is closed". A static IP
-                    # that AutomatedLab bakes into the guest's unattend file lets it
-                    # connect to a known address - the supported pattern for internal
-                    # switches. Gateway = host vNIC, DNS = the DC. Internet (for the
-                    # Autopilot script install) still flows out via the host's NAT.
-                    $labIp = '{0}.{1}' -f $nestedOctetBase, ($i + 1)
-                    $nic = New-LabNetworkAdapterDefinition `
-                        -VirtualSwitch  'NestedSwitch' `
-                        -Ipv4Address    $labIp `
-                        -Ipv4Gateway    $state.HostVNicIP `
-                        -Ipv4DNSServers $state.DNSServerAddress
-
-                    Add-LabMachineDefinition `
-                        -Name $labName `
-                        -OperatingSystem $operatingSystemName `
-                        -Memory    4GB `
-                        -MinMemory 512MB `
-                        -MaxMemory 4GB `
-                        -NetworkAdapter $nic
-
-                    Write-Output "Installing lab '$labName' ($operatingSystemName) with checkpoints disabled..."
-                    Install-Lab -CreateCheckPoints:$false
-
-                    Write-Output "Waiting for remoting to become available on '$labName'..."
-                    if (-not (Wait-LabRemotingReady -ComputerName $labName -TimeoutMinutes 25 -PollSeconds 20)) {
-                        # Do NOT throw. Leave the VM in place for diagnostics instead
-                        # of letting a terminating remoting error tear the lab down;
-                        # the VM can then be inspected / RDP'd into and retried.
-                        Write-Warning "Remoting did not become ready on '$labName' within the timeout window; leaving the VM in place and skipping Autopilot capture for this lab."
-                        continue
-                    }
-
-                    Write-Output "Capturing Autopilot hash for '$labName'..."
-                    $captureSuccess = $false
-                    for ($attempt = 1; $attempt -le 3 -and -not $captureSuccess; $attempt++) {
-                        try {
-                            Invoke-LabCommand -ComputerName $labName -FilePath $captureScript -NoDisplay -ErrorAction Stop
-                            $captureSuccess = $true
-                        }
-                        catch {
-                            if ($attempt -lt 3) {
-                                Write-Warning "Autopilot capture attempt $attempt failed on '$labName': $($_.Exception.Message). Retrying in 30 seconds..."
-                                Start-Sleep -Seconds 30
-                            }
-                            else {
-                                throw
-                            }
-                        }
-                    }
-
-                    # Pull the CSV onto the host as F:\LabSources\Autopilot\LAB<n>.csv.
-                    $hostCsv = Join-Path $autopilotDir ($labName + '.csv')
-                    $csvContent = Invoke-LabCommand -ComputerName $labName -ScriptBlock {
-                        Get-Content -Path ("C:\HWID\" + $env:COMPUTERNAME + ".csv") -Raw
-                    } -PassThru -NoDisplay
-                    if ($csvContent) {
-                        Set-Content -Path $hostCsv -Value $csvContent -Encoding UTF8
-                        Write-Output "Autopilot hash for '$labName' saved to $hostCsv."
-                    }
-                    else {
-                        Write-Warning "No Autopilot hash CSV captured from '$labName'."
-                    }
-
-                    # Sysprep /generalize /oobe /shutdown without -Wait: WinRM will
-                    # be torn down when the VM shuts down, which would otherwise hang
-                    # Invoke-LabCommand. Poll Get-VM state from the host instead.
-                    Write-Output "Sysprep'ing '$labName' back to OOBE and shutting it down..."
-                    Invoke-LabCommand -ComputerName $labName -ScriptBlock {
-                        Start-Process -FilePath "$env:SystemRoot\System32\Sysprep\Sysprep.exe" `
-                                      -ArgumentList '/generalize /oobe /shutdown /quiet'
-                    } -NoDisplay
-
-                    # A machine that completes 'sysprep /generalize /oobe /shutdown'
-                    # powers itself off. A clean self-shutdown within the deadline is
-                    # therefore our signal that generalize succeeded and the VM will
-                    # boot into OOBE next time. If it never powers off we force-stop
-                    # it, but in that case sysprep almost certainly failed (e.g. an
-                    # AppX provisioning error logged to C:\Windows\System32\Sysprep\
-                    # Panther\setupact.log), so the VM is NOT in an OOBE state and we
-                    # must NOT label a checkpoint 'AutopilotReady'.
-                    $syspreptedOff   = $false
-                    $shutdownDeadline = (Get-Date).AddMinutes(30)
-                    while ((Get-Date) -lt $shutdownDeadline) {
-                        $vm = Get-VM -Name $labName -ErrorAction SilentlyContinue
-                        if ($vm -and $vm.State -eq 'Off') { $syspreptedOff = $true; break }
-                        Start-Sleep -Seconds 10
-                    }
-
-                    if (-not $syspreptedOff) {
-                        Write-Warning "'$labName' did not power off within the deadline; sysprep likely failed, so the VM is not in an OOBE state. Forcing stop and skipping the 'AutopilotReady' checkpoint."
-                        Stop-VM -Name $labName -TurnOff -Force -ErrorAction SilentlyContinue
-                    }
-                    else {
-                        Write-Output "Snapshotting powered-off, sysprepped '$labName' as 'AutopilotReady'..."
-                        Checkpoint-VM -Name $labName -SnapshotName 'AutopilotReady'
-                    }
-                }
-                catch {
-                    Write-Warning "Lab '$labName' setup failed: $($_.Exception.Message). Continuing with the next lab."
-                }
-            }
-        }
-        catch {
-            Write-Warning "AutomatedLab deployment block failed: $($_.Exception.Message). Continuing."
-        }
-        finally {
-            if ($scriptEapBackup) {
-                $ErrorActionPreference = $scriptEapBackup
-            }
-            if ($scriptConfirmBackup) {
-                $ConfirmPreference = $scriptConfirmBackup
-            }
-            if ($scriptConfirmDefaultBackupExists) {
-                $PSDefaultParameterValues['*:Confirm'] = $scriptConfirmDefaultBackup
-            }
-            else {
-                [void]$PSDefaultParameterValues.Remove('*:Confirm')
+                Write-Warning "Golden image build failed: $($_.Exception.Message)."
             }
         }
     }
     else {
-        Write-Warning "Windows 11 ISO not present at $isoPath; skipping LAB1..LAB8 deployment."
+        Write-Warning 'Skipping golden image build (ISO or New-GoldenImage.ps1 missing).'
+    }
+
+    # --- Step 3: create the 6 lab VMs and checkpoint them at OOBE ---------------
+    if ((Test-Path $goldenVhdxPath) -and (Test-Path $newLabVMs)) {
+        Write-Output 'Creating lab VMs from the golden image...'
+        try {
+            & $newLabVMs -Count 6 -GoldenVhdxPath $goldenVhdxPath -SwitchName 'NestedSwitch' -VhdRoot $vhdDir -CheckpointName 'OOBE'
+        }
+        catch {
+            Write-Warning "Lab VM creation failed: $($_.Exception.Message)."
+        }
+    }
+    else {
+        Write-Warning 'Skipping lab VM creation (golden image or New-LabVMs.ps1 missing).'
     }
 
     Unregister-ScheduledTask -TaskName 'HVHostPostBoot' -Confirm:$false -ErrorAction SilentlyContinue
@@ -702,6 +416,28 @@ finally {
 
     $postBootScript = "$env:SystemDrive\AzureVMLabs\HVHostPostBoot.ps1"
     Set-Content -Path $postBootScript -Value $postBoot -Encoding UTF8
+
+    # Stage the nested-VM helper scripts on the OS disk so they survive the reboot.
+    # The Custom Script Extension downloads them next to this script (listed in the
+    # extension's fileUris); the post-boot task copies them from here onto F:\ and
+    # runs them. If any are missing, the post-boot task logs a warning and skips the
+    # matching step rather than failing the whole deployment.
+    Write-Output 'Staging nested-VM helper scripts for the post-boot task...'
+    $helperStageDir = Join-Path $stateDir 'Scripts'
+    if (-not (Test-Path $helperStageDir)) {
+        New-Item -ItemType Directory -Path $helperStageDir -Force | Out-Null
+    }
+    $helperSource = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+    foreach ($helper in @('New-GoldenImage.ps1', 'New-LabVMs.ps1', 'Get-AutopilotHash.ps1')) {
+        $helperPath = Join-Path $helperSource $helper
+        if (Test-Path $helperPath) {
+            Copy-Item -Path $helperPath -Destination (Join-Path $helperStageDir $helper) -Force
+            Write-Output "  Staged $helper."
+        }
+        else {
+            Write-Warning "  Helper script '$helper' not found next to HVHostSetup.ps1 at $helperPath; the post-boot task will skip the matching step."
+        }
+    }
 
     Write-Output 'Registering one-shot post-boot scheduled task...'
     $action    = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-ExecutionPolicy Bypass -NoProfile -File `"$postBootScript`""
